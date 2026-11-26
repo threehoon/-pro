@@ -32,15 +32,40 @@ export interface AiResult<T> {
   reason?: string;
 }
 
+export type DepartmentCode = "XS" | "YF" | "SC" | "CG" | "CW" | "RS" | "XZ" | "PZ" | "CC" | "GL";
+export type JobLevelCode = "L1" | "L2" | "L3" | "L4" | "L5" | "L6";
+export type CareerTraitCode = "A" | "B" | "C" | "D" | "E" | "F" | "G" | "H";
+
+export interface ProfileMeta {
+  code?: string;
+  industry?: string;
+  department_code?: DepartmentCode;
+  department?: string;
+  level?: JobLevelCode;
+  level_name?: string;
+  level_tagline?: string;
+  location?: string;
+}
+
+export interface ProfileTraitMatch {
+  code: CareerTraitCode;
+  name?: string;
+  combo?: string;
+  reason: string;
+}
+
 export interface ProfileLabel {
   name: string;
   weight: number;
   tiers: Record<Tier, string>;
 }
 export interface ProfileContent {
+  meta?: ProfileMeta;
   positioning: string;
+  responsibilities?: string[];
   hard_gates: { condition: string; how: string }[];
   indicators: { name: string; weight: number; labels: ProfileLabel[] }[];
+  trait_match?: ProfileTraitMatch;
   redlines: string[];
   bonus: string[];
   not_wanted: string[];

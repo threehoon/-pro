@@ -545,6 +545,8 @@ function ScreeningTab({
   const [selected, setSelected] = useState<string[]>([]);
   const [archiveReason, setArchiveReason] = useState("");
   const [busy, setBusy] = useState("");
+  const [restoring, setRestoring] = useState("");
+  const [restoreError, setRestoreError] = useState("");
   const [report, setReport] = useState<{ done: number; failed: Array<{ name: string; reason: string }> } | null>(null);
 
   // 名字带「还没生成总结」的排在后面：需要人立刻处理的是「等你看」和「筛选失败」。
@@ -590,6 +592,20 @@ function ScreeningTab({
     setReport({ done, failed: failures });
     setSelected([]);
     onChanged();
+  }
+
+  // 归档错了要能撤回：恢复回原阶段，人重新出现在对应的队列里。
+  async function restore(card: BoardCard) {
+    setRestoring(card.id);
+    setRestoreError("");
+    try {
+      await api.reopen(card.id);
+      onChanged();
+    } catch (err) {
+      setRestoreError(err instanceof ApiError ? err.message : `${card.candidate_name} 恢复失败`);
+    } finally {
+      setRestoring("");
+    }
   }
 
   const allVisibleSelected = visible.length > 0 && visible.every((card) => selected.includes(card.id));
@@ -673,10 +689,26 @@ function ScreeningTab({
             <strong>已归档</strong>
             <span className="col-count">{rejected.length}</span>
           </summary>
+          {restoreError && <p className="form-error" role="alert">{restoreError}</p>}
           {rejected.length ? (
             <ul className="queue-list">
               {rejected.map((card) => (
-                <QueueRow key={card.id} card={card} archived />
+                <QueueRow
+                  key={card.id}
+                  card={card}
+                  archived
+                  action={canWrite ? (
+                    <Button
+                      size="sm"
+                      className="queue-action"
+                      loading={restoring === card.id}
+                      disabled={Boolean(restoring) && restoring !== card.id}
+                      onClick={() => void restore(card)}
+                    >
+                      恢复
+                    </Button>
+                  ) : undefined}
+                />
               ))}
             </ul>
           ) : (
@@ -966,7 +998,7 @@ function QueueRow({
           </>
         )}
       </div>
-      {archived ? null : action ?? (onOpen ? (
+      {action ?? (archived ? null : onOpen ? (
         <Button size="sm" className="queue-action" onClick={onOpen}>
           {openLabel ?? target.label}
         </Button>

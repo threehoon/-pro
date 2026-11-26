@@ -126,7 +126,8 @@ const capture = async (label, width, selector) => {
     if (selector === '#screening') await ev(`document.getElementById('screening').scrollIntoView({ block: 'start' })`);
     await sleep(250);
     await mkdir(screenshotDir, { recursive: true });
-    const { data } = await send('Page.captureScreenshot', { format: 'png' });
+    const fullPage = label.startsWith('job-profile');
+    const { data } = await send('Page.captureScreenshot', fullPage ? { format: 'png', captureBeyondViewport: true } : { format: 'png' });
     await writeFile(join(screenshotDir, `${label}-${width}.png`), Buffer.from(data, 'base64'));
   }
 };
@@ -302,8 +303,29 @@ const confirm = async (label, title) => {
   await ev(`${expression}.click()`);
 };
 await send('Page.navigate', { url: `${BASE}/jobs/${jobId}/profile` });
+await waitFor(`Boolean(document.querySelector('#profile .profile-sheet'))`, '岗位画像标准页加载');
+check('岗位画像展示基本档案、职责、四维权重、五档矩阵、职业特质与判定口径', await ev(`(() => {
+  const sheet = document.querySelector('#profile .profile-sheet');
+  if (!sheet) return false;
+  const metaItems = sheet.querySelectorAll('.profile-meta-grid .profile-meta-item').length;
+  const resps = sheet.querySelectorAll('.profile-resp-list li').length;
+  const weights = sheet.querySelectorAll('.profile-weight-band .profile-weight-cell').length;
+  const cTiers = sheet.querySelectorAll('.profile-tier-matrix .profile-tier-cell.is-standard').length;
+  const trait = Boolean(sheet.querySelector('.profile-trait-card'));
+  const rule = Boolean(sheet.querySelector('.profile-scoring-rule'));
+  return metaItems >= 3 && resps >= 5 && weights === 4 && cTiers >= 12 && trait && rule;
+})()`));
+for (const width of [390, 768, 1440]) await capture('job-profile', width, '#profile .profile-sheet');
 await click('确认画像', '#profile');
 await waitFor(`document.querySelector('#profile .workflow-context')?.textContent.includes('已确认的第 1 版')`, '职位显示当前已确认版本');
+await click('编辑画像', '#profile');
+await waitFor(`Boolean(document.querySelector('#profile .profile-editor-section'))`, '打开岗位画像编辑器');
+await field('所属行业', '智能制造与SaaS', '#profile');
+await click('保存草稿', '#profile');
+await waitFor(`document.querySelector('#profile .profile-meta-grid')?.textContent.includes('智能制造与SaaS')`, '画像编辑保存后即时更新');
+check('岗位画像可在线编辑行业并保存为新草稿', await ev(`Boolean(document.querySelector('#profile .card-head')?.textContent.includes('第 2 版')) && Boolean(document.querySelector('#profile .workflow-context')?.textContent.includes('新版本确认前继续使用'))`));
+await click('确认画像', '#profile');
+await waitFor(`document.querySelector('#profile .workflow-context')?.textContent.includes('已确认的第 2 版')`, '确认编辑后的第 2 版画像');
 // Simulate one delayed screening response in the browser, then resume using the isolated server.
 await ev(`(() => {
   const realFetch = window.fetch.bind(window);
@@ -466,6 +488,19 @@ await click('批量归档');
 await waitFor(`document.querySelector('.queue-report')?.textContent.includes('已处理 1 人')`, '批量归档回报');
 await waitFor(`document.querySelector('.rejected-block')?.textContent.includes('归档测试')`, '批量归档进入已归档区');
 check('批量归档带原因且留在筛选页', await ev(`location.pathname === '/jobs/${jobId}/screening'`));
+// 归档错了要能撤回：已归档区里点「恢复」回到原阶段
+await ev(`document.querySelector('.rejected-block summary').click()`);
+await waitFor(`Boolean([...document.querySelectorAll('.rejected-block .queue-row')].find((row) => row.textContent.includes('归档测试')))`, '展开已归档区');
+const restoreButton = `[...document.querySelectorAll('.rejected-block .queue-row')].find((row) => row.textContent.includes('归档测试'))?.querySelector('button')`;
+check('已归档行提供恢复入口', await ev(`${restoreButton}?.textContent.trim() === '恢复'`));
+await ev(`${restoreButton}.click()`);
+// 待筛选卡片才有 .queue-tools；用它定位，避免把已归档列表里的同名行当成回来了
+const inPendingQueue = `[...document.querySelectorAll('.card')].some((card) => card.querySelector('.queue-tools') && card.textContent.includes('归档测试'))`;
+const inArchive = `[...document.querySelectorAll('.rejected-block .queue-row')].some((row) => row.textContent.includes('归档测试'))`;
+await waitFor(`!${inArchive}`, '恢复后已归档区移除该人');
+await waitFor(inPendingQueue, '恢复后回到待筛选队列');
+check('恢复后回到待筛选队列且不在已归档区', await ev(`Boolean(${inPendingQueue}) && !Boolean(${inArchive})`));
+check('恢复后仍留在筛选页', await ev(`location.pathname === '/jobs/${jobId}/screening'`));
 
 // 6. 面试子模块就地约面、贴稿、定去留
 await send('Page.navigate', { url: `${BASE}/jobs/${jobId}/interviews` });
@@ -585,6 +620,9 @@ check('职位头部的流程中人数不含已入职候选人', await ev(`(async
   return text.includes(live + ' 人在流程中') && text.includes(hired + ' 人已入职') && hired === 1;
 })()`));
 await capture('screening-dark', 1440, '.resume-import');
+await send('Page.navigate', { url: `${BASE}/jobs/${jobId}/profile` });
+await waitFor(`document.documentElement.dataset.theme === 'dark' && Boolean(document.querySelector('#profile .profile-sheet'))`, '深色主题岗位画像页');
+await capture('job-profile-dark', 1440, '#profile .profile-sheet');
 await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
 check('减少动态效果时页面没有入场动画', await ev(`matchMedia('(prefers-reduced-motion: reduce)').matches && getComputedStyle(document.querySelector('.page')).animationName === 'none'`));
 

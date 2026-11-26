@@ -14,7 +14,7 @@ delete process.env.LLM_API_KEY;
 const { buildApp } = await import('../src/app.ts');
 const { closeDb, getRow, run, uploadDir } = await import('../src/db/index.ts');
 const { decodeLlmResponse, isPublicAddress, llmTransport, LlmFailure, publicLlmBaseUrl, selectLlmAddress } = await import('../src/integrations/llm.ts');
-const { fallbackProfile, normalizeProfile, scoreScreening, validateScreening } = await import('../src/services/recruitment-evidence.ts');
+const { fallbackProfile, normalizeGeneratedProfile, normalizeProfile, scoreScreening, validateScreening } = await import('../src/services/recruitment-evidence.ts');
 const { now } = await import('../src/lib/util.ts');
 
 let app: Awaited<ReturnType<typeof buildApp>>;
@@ -210,8 +210,11 @@ test('creating a title-only job queues an AI portrait and clearly reports a blan
       assert.match(instruction, /只有岗位名称/);
       const example = instruction.split('\n').find((line) => line.startsWith('{'));
       assert.ok(example);
-      assert.equal(JSON.parse(example).technical[0][4], '能独立处理常见故障');
-      assert.equal(options?.maxTokens, 4200);
+      const parsedExample = JSON.parse(example);
+      assert.equal(parsedExample.meta.department_code, 'SC');
+      assert.equal(parsedExample.trait_match.code, 'B');
+      assert.match(parsedExample.technical[0][4], /能独立处理常见故障/);
+      assert.equal(options?.maxTokens, 5200);
       assert.equal(options?.deepSeekThinking, calls % 2 ? 'disabled' : 'enabled');
       assert.ok(options && options.timeoutMs! > 0 && options.timeoutMs! <= 45_000);
       if (calls <= 2) throw new LlmFailure('empty_response', { tokensIn: 22, tokensOut: 5 });
@@ -604,5 +607,244 @@ test('job resume import requires a confirmed portrait, deduplicates atomically a
     assert.equal((await inject('POST', archivedPath, { decision: 'reject' })).json().application.status, 'rejected');
   } finally {
     llmTransport.requestJson = previousTransport;
+  }
+});
+
+test('standard portrait fallback tailors department, level, weights, responsibilities, labels and trait by role', () => {
+  const tech = fallbackProfile('高级前端架构师', '负责前端工程化与核心交易系统架构设计，要求本科及以上学历，熟练掌握 React/TypeScript', ['React', 'TypeScript'], {
+    department: '前端研发部', location: '杭州', level: 'L4',
+  });
+  const sales = fallbackProfile('大客户销售顾问', '负责华东区B端大客户拓展、商务谈判与年度回款目标达成', ['大客户拓展', 'CRM'], {
+    department: '华东销售部', location: '上海',
+  });
+  const salesManager = fallbackProfile('大客户销售经理', '负责华东区B端销售团队管理与年度业绩指标达成', ['团队管理', '大客户拓展'], {
+    department: '华东销售部', location: '上海',
+  });
+  const finance = fallbackProfile('财务会计', '负责全盘账务核算、税务申报、月度合并报表及内控合规审查', ['合并报表', '税务筹划']);
+
+  assert.equal(tech.meta?.department_code, 'YF');
+  assert.equal(tech.meta?.level, 'L4');
+  assert.equal(tech.meta?.level_name, '策略岗');
+  assert.equal(tech.meta?.location, '杭州');
+  assert.equal(tech.trait_match?.code, 'G');
+  assert.equal(tech.trait_match?.name, '分析者');
+  assert.ok((tech.responsibilities?.length ?? 0) >= 5);
+
+  assert.equal(sales.meta?.department_code, 'XS');
+  assert.equal(sales.trait_match?.code, 'C');
+  assert.equal(salesManager.meta?.department_code, 'XS');
+  assert.equal(salesManager.meta?.level, 'L4');
+  assert.equal(salesManager.trait_match?.code, 'A');
+  assert.notDeepEqual(
+    tech.indicators.map(({ weight }) => weight),
+    sales.indicators.map(({ weight }) => weight),
+  );
+  assert.notEqual(
+    tech.indicators[2]!.labels[0]!.name,
+    sales.indicators[2]!.labels[0]!.name,
+  );
+
+  assert.equal(finance.meta?.department_code, 'CW');
+  assert.equal(finance.trait_match?.code, 'F');
+  for (const item of [tech, sales, salesManager, finance]) {
+    assert.equal(item.indicators.reduce((sum, ind) => sum + ind.weight, 0), 100);
+    for (const ind of item.indicators) {
+      assert.ok(ind.labels.length >= 3 && ind.labels.length <= 6);
+      assert.equal(ind.labels.reduce((sum, label) => sum + label.weight, 0), ind.weight);
+    }
+  }
+});
+
+test('generated portrait supports 3-6 labels per dimension, meta/trait normalization, compliance rewrite and legacy compatibility', () => {
+  const raw = {
+    meta: { code: 'YF-L3', industry: '工业互联网', department_code: 'YF', level: 'L3', location: '苏州' },
+    positioning: '负责工业物联网后端服务开发与稳定性保障',
+    responsibilities: [
+      '负责核心设备接入与高并发消息处理服务研发',
+      '制定接口规范、完善单元测试与线上监控告警',
+      '排查线上性能瓶颈与生产故障并沉淀复盘文档',
+      '仅限男性参与夜间值班',
+      '协同前端与嵌入式团队推进版本按期交付',
+    ],
+    hard_gates: [
+      { condition: '本科及以上学历，计算机相关专业', how: '核验学历证书' },
+      { condition: '35岁以下', how: '核验身份证' },
+    ],
+    trait_match: { code: 'G', reason: '需要系统性拆解并发问题与严谨的工程分析能力' },
+    redlines: ['简历核心项目经历造假', '未婚优先'],
+    not_wanted: ['抗拒代码评审与规范沉淀'],
+    bonus: ['具备高并发 MQTT/Kafka 生产调优经验'],
+    weights: [20, 20, 40, 20],
+    background: [
+      ['后端开发年限', 8, '无生产经验', '1年以内', '3年以上后端实操经验', '5年以上核心系统经验', '主导大型系统演进'],
+      ['工业/物联网背景', 6, '无相关认知', '了解概念', '有相关业务落地经历', '熟悉多协议接入', '主导行业平台架构'],
+      ['工程规范积累', 6, '无规范习惯', '被动遵守', '自觉编写单测与文档', '推动团队规范落地', '建立研发质量体系'],
+    ],
+    attitude: [
+      ['责任闭环意识', 10, '遇故障推诿', '提醒后跟进', '主动闭环所负责问题', '提前识别隐患预警', '带动团队形成兜底文化'],
+      ['技术自驱力', 5, '拒绝学习', '被动查资料', '持续复盘并补齐短板', '主动分享最佳实践', '引领团队技术升级'],
+      ['抗压与交付稳健度', 5, '高压易失误', '需协助稳住', '版本节点稳定按期交付', '复杂变更零事故上线', '构建高韧性交付机制'],
+    ],
+    technical: [
+      ['服务端架构设计', 12, '仅写单表接口', '可仿写模块', '独立完成核心模块设计', '主导多服务高可用设计', '操盘千万级架构治理'],
+      ['数据库与缓存调优', 10, '不会排查慢查询', '能加基础索引', '独立定位并优化高频慢查询', '完成分库分表与缓存架构', '建立全链路性能基线'],
+      ['故障定位与复盘', 10, '无法定位线上异常', '按日志排查', '独立定位常见线上故障', '快速定位跨服务复杂故障', '沉淀排障SOP与演练体系'],
+      ['安全与稳定性实践', 8, '忽略权限校验', '基础参数校验', '落实鉴权、幂等与限流保护', '构建容灾降级方案', '主导全栈安全合规治理'],
+    ],
+    collaboration: [
+      ['跨团队接口协同', 8, '沟通含糊反复返工', '按要求同步', '清晰定义接口契约并按期联调', '主动拉通上下游化解阻塞', '优化跨端协作流程'],
+      ['代码评审与共建', 6, '抗拒评审意见', '按意见修改', '认真评审并给出建设性建议', '帮带新人提升代码质量', '建立高效评审机制'],
+      ['需求澄清能力', 6, '照单全收不质疑', '发现明显漏洞', '能识别边界条件与技术风险', '协同产品优化业务方案', '从技术视角反哺业务规划'],
+    ],
+  };
+
+  const normalized = normalizeGeneratedProfile(raw, '后端开发工程师 本科及以上学历', false);
+  assert.ok(normalized);
+  assert.equal(normalized.meta?.code, 'YF-L3');
+  assert.equal(normalized.meta?.department, '研发技术岗');
+  assert.equal(normalized.meta?.level_name, '实施岗');
+  assert.equal(normalized.trait_match?.code, 'G');
+  assert.equal(normalized.trait_match?.name, '分析者');
+  assert.equal(normalized.trait_match?.combo, '主完美型 · 辅交流型');
+  assert.equal(normalized.indicators[2]!.labels.length, 4);
+  assert.equal(normalized.compliance_rewritten, true);
+  assert.ok(!JSON.stringify(normalized).includes('仅限男性'));
+  assert.ok(!JSON.stringify(normalized).includes('35岁以下'));
+  assert.ok(!JSON.stringify(normalized).includes('未婚'));
+
+  // Legacy portrait without meta/responsibilities/trait_match and with only 1-2 labels remains 100% valid
+  const legacyIndicators = normalized.indicators.map((item, idx) => ({
+    ...item,
+    weight: 25,
+    labels: idx === 0
+      ? [{ ...item.labels[0]!, weight: 25 }]
+      : [
+          { ...item.labels[0]!, weight: 13 },
+          { ...item.labels[1]!, weight: 12 },
+        ],
+  }));
+  const legacy = normalizeProfile({
+    positioning: '旧版岗位定位',
+    hard_gates: [{ condition: '本科以上', how: '查验学历' }],
+    indicators: legacyIndicators,
+    redlines: ['履历造假'],
+    bonus: [],
+    not_wanted: [],
+  });
+  assert.ok(legacy);
+  assert.equal(legacy.meta, undefined);
+  assert.equal(legacy.responsibilities, undefined);
+  assert.equal(legacy.trait_match, undefined);
+  assert.equal(legacy.indicators[0]!.labels.length, 1);
+  assert.equal(legacy.indicators[1]!.labels.length, 2);
+});
+
+test('legacy 2-label stored portrait can be read, edited, approved, and used for screening', async () => {
+  run("DELETE FROM integrations WHERE provider = 'llm'");
+  const created = await inject('POST', '/api/jobs', { title: '历史画像兼容岗位' });
+  assert.equal(created.statusCode, 201);
+  const jobId = created.json().job.id;
+  await waitFor(`/api/jobs/${jobId}/profile`, 'ready');
+
+  const base = fallbackProfile('历史画像兼容岗位', '', []);
+  const legacyContent = {
+    positioning: '旧版 2 标签岗位定位',
+    hard_gates: [],
+    indicators: base.indicators.map((ind) => ({
+      name: ind.name,
+      weight: 25,
+      labels: [
+        { ...ind.labels[0]!, weight: 13 },
+        { ...ind.labels[1]!, weight: 12 },
+      ],
+    })),
+    redlines: [],
+    bonus: [],
+    not_wanted: [],
+  };
+  run("UPDATE job_profiles SET content_json = ?, status = 'draft' WHERE job_id = ?", [JSON.stringify(legacyContent), jobId]);
+
+  const readRes = await inject('GET', `/api/jobs/${jobId}/profile`);
+  assert.equal(readRes.statusCode, 200);
+  const fetched = readRes.json().data.profile;
+  assert.ok(fetched?.content);
+  assert.equal(fetched.content.indicators[0].labels.length, 2);
+
+  const edited = { ...fetched.content, positioning: '旧版 2 标签岗位定位（已微调）' };
+  const saveRes = await inject('PUT', `/api/jobs/${jobId}/profile`, { content: edited });
+  assert.equal(saveRes.statusCode, 200);
+  const savedProfileId = saveRes.json().data.profile.id;
+  assert.equal(saveRes.json().data.profile.content.indicators[0].labels.length, 2);
+
+  const approveRes = await inject('POST', `/api/jobs/${jobId}/profile/approve`, { profileId: savedProfileId });
+  assert.equal(approveRes.statusCode, 200);
+  assert.equal(approveRes.json().data.profile.status, 'approved');
+
+  const candRes = await inject('POST', '/api/candidates', {
+    name: '历史画像候选人',
+    email: 'legacy-portrait-cand@example.com',
+    resume_text: '拥有 4 年相关岗位经验，擅长跨团队协作并持续复盘改进流程。',
+  });
+  assert.equal(candRes.statusCode, 201);
+  const appRes = await inject('POST', '/api/applications', {
+    jobId,
+    candidateId: candRes.json().candidate.id,
+  });
+  assert.equal(appRes.statusCode, 201);
+  const screened = await waitFor(`/api/applications/${appRes.json().application.id}/screening`, 'ready');
+  assert.equal(screened.data.review.profileVersion, 2);
+});
+
+test('rich job metadata flows into AI portrait generation input and round-trips through profile API', async () => {
+  let receivedJd = '';
+  const generated = fallbackProfile('产品经理', '负责B端工作台规划与需求交付', ['原型设计', '数据分析'], {
+    department: '产品部', location: '北京', level: 'L3',
+  });
+  const compact = {
+    meta: generated.meta,
+    positioning: generated.positioning,
+    responsibilities: generated.responsibilities,
+    hard_gates: [{ condition: '3年以上B端产品经验', how: '核对简历项目周期' }],
+    trait_match: { code: generated.trait_match!.code, reason: generated.trait_match!.reason },
+    redlines: ['核心业务指标造假'],
+    not_wanted: ['缺乏数据分析与复盘习惯'],
+    bonus: ['有HR SaaS产品从0到1经验'],
+    weights: generated.indicators.map(({ weight }) => weight),
+    background: generated.indicators[0]!.labels.map((l) => [l.name, l.weight, l.tiers.E, l.tiers.D, l.tiers.C, l.tiers.B, l.tiers.A]),
+    attitude: generated.indicators[1]!.labels.map((l) => [l.name, l.weight, l.tiers.E, l.tiers.D, l.tiers.C, l.tiers.B, l.tiers.A]),
+    technical: generated.indicators[2]!.labels.map((l) => [l.name, l.weight, l.tiers.E, l.tiers.D, l.tiers.C, l.tiers.B, l.tiers.A]),
+    collaboration: generated.indicators[3]!.labels.map((l) => [l.name, l.weight, l.tiers.E, l.tiers.D, l.tiers.C, l.tiers.B, l.tiers.A]),
+  };
+  await inject('POST', '/api/settings/llm', { apiKey: ['unit', 'meta', 'z9x8'].join('-') });
+  try {
+    llmTransport.requestJson = async (_config, _instruction, input) => {
+      receivedJd = JSON.parse(input).jd;
+      return { value: compact, tokensIn: 120, tokensOut: 980 };
+    };
+    const created = await inject('POST', '/api/jobs', {
+      title: '产品经理',
+      department: '产品部',
+      location: '北京',
+      level: 'L3',
+      salary_min: 22000,
+      salary_max: 32000,
+      description: '负责B端工作台规划与核心流程迭代',
+      requirements: '3年以上B端产品经验，具备较强数据分析能力',
+      skills: ['原型设计', '数据分析'],
+    });
+    assert.equal(created.statusCode, 201);
+    const jobId = created.json().job.id;
+    const ready = await waitFor(`/api/jobs/${jobId}/profile`, 'ready');
+    assert.match(receivedJd, /所属部门：产品部/);
+    assert.match(receivedJd, /职级\/能级：L3/);
+    assert.match(receivedJd, /工作地点：北京/);
+    assert.match(receivedJd, /薪资预算：22000 - 32000 元\/月/);
+    assert.equal(ready.data.profile.content.meta.level, 'L3');
+    assert.equal(ready.data.profile.content.trait_match.code, generated.trait_match!.code);
+    assert.equal(ready.data.profile.content.hard_gates.length, 1);
+    assert.ok(ready.data.profile.content.responsibilities.length >= 5);
+  } finally {
+    llmTransport.requestJson = originalTransport;
+    run("DELETE FROM integrations WHERE provider = 'llm'");
   }
 });

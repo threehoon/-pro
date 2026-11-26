@@ -49,7 +49,7 @@ export function ScreeningPanel({ application, canWrite, rejectionReasons, onChan
   }
 
   async function decide() {
-    if (decision === "reject" && !(await confirm({ title: "归档这条投递？", description: "投递将从流程移至已归档，仍可从看板恢复。", confirmLabel: "归档投递", tone: "danger" }))) return;
+    if (decision === "reject" && !(await confirm({ title: "归档这条投递？", description: "投递将从流程移至已归档，之后可以在职位的「已归档」里恢复。", confirmLabel: "归档投递", tone: "danger" }))) return;
     void run("decide", () => api.decideScreening(application.id, decision, decision === "reject" ? selectedArchiveReason : reason.trim() || undefined), true);
   }
 

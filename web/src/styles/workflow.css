@@ -674,7 +674,7 @@
   padding: var(--sp-3);
   border: 1px solid var(--line);
   border-radius: var(--r-card);
-  background: var(--surface-2);
+  background: var(--surface-sunken);
 }
 
 .queue-batch-reason p {

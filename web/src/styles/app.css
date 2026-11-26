@@ -3152,11 +3152,54 @@ a.status-chip-more:hover {
   gap: var(--sp-3);
 }
 
+.agenda-badges {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .agenda-actions {
   display: flex;
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 4px;
+}
+
+.interview-sync-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface-sunken);
+}
+
+.interview-sync-main {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  font-size: var(--fs-13);
+}
+
+.interview-sync-link {
+  color: var(--brand);
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.interview-sync-link:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.interview-sync-error {
+  flex-basis: 100%;
+  margin: 0;
 }
 
 .agenda-feedback {

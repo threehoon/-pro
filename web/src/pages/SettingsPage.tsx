@@ -27,6 +27,20 @@ const NOTIFY_STATUS: Record<string, { label: string; tone: "neutral" | "brand" |
   skipped: { label: "已跳过", tone: "neutral" },
 };
 
+function parseNotificationDelivery(payload: string | null): { delivery: "dm" | "webhook"; recipientName: string | null } {
+  if (!payload) return { delivery: "webhook", recipientName: null };
+  try {
+    const parsed = JSON.parse(payload) as Record<string, unknown>;
+    return {
+      delivery: parsed.delivery === "dm" ? "dm" : "webhook",
+      recipientName:
+        typeof parsed.recipientName === "string" && parsed.recipientName.trim() ? parsed.recipientName.trim() : null,
+    };
+  } catch {
+    return { delivery: "webhook", recipientName: null };
+  }
+}
+
 export function SettingsPage({
   user,
   meta,
@@ -223,6 +237,8 @@ export function SettingsPage({
   }
 
   const pendingCount = notifyStats?.pending ?? feishu?.pendingNotifications ?? 0;
+  const sendablePending = notifyStats?.sendablePending ?? 0;
+  const sendableFailed = notifyStats?.sendableFailed ?? 0;
   const failedCount = notifyStats?.failed ?? feishu?.failedNotifications ?? 0;
   const sentCount = notifyStats?.sent ?? feishu?.sentNotifications ?? 0;
   const skippedCount = notifyStats?.skipped ?? 0;
@@ -238,7 +254,7 @@ export function SettingsPage({
           <div>
             <h2>飞书接入</h2>
             <p className="card-sub">
-              支持群机器人卡片推送与飞书扫码登录；配置 App ID / App Secret 并在飞书后台登记回调地址后即可扫码登录。
+              支持群机器人卡片推送、扫码登录、面试日历同步与面试官应用私信；配置对应凭证后即可按需启用。
             </p>
           </div>
           {feishu && (
@@ -275,10 +291,10 @@ export function SettingsPage({
                     {feishu.ready.notifications ? "机器人推送已就绪" : "机器人推送待接入"}
                   </Badge>
                   <Badge tone={feishu.ready.login ? "brand" : "neutral"}>
-                    {feishu.ready.login ? "扫码登录已就绪" : "扫码登录待接入"}
+                    {feishu.ready.login ? "扫码登录与私信已就绪" : "扫码登录与私信待接入"}
                   </Badge>
                   <Badge tone={feishu.ready.calendar ? "brand" : "neutral"}>
-                    {feishu.ready.calendar ? "日历已就绪" : "日历待接入"}
+                    {feishu.ready.calendar ? "日历同步已就绪" : "日历同步待接入"}
                   </Badge>
                 </div>
               </div>
@@ -312,10 +328,13 @@ export function SettingsPage({
             {isAdmin ? (
               <FeishuForm
                 status={feishu}
-                onSaved={(next) => {
+                onSaved={(next, message) => {
                   setFeishu(next);
                   onFeishuConfigChanged?.(next.ready.login);
-                  toast.push("飞书配置已保存", "success");
+                  loadNotifications();
+                  if (message !== null) {
+                    toast.push(message ?? "飞书配置已保存", "success");
+                  }
                 }}
               />
             ) : (
@@ -338,19 +357,19 @@ export function SettingsPage({
           <div>
             <h2>飞书出站箱</h2>
             <p className="card-sub">
-              阶段流转与面试安排在配置机器人 Webhook 后自动异步推送；未配置或推送失败时留在这里，不影响招聘操作。
+              阶段流转与面试变更会自动异步推送群机器人卡片，已绑定飞书的面试官同时收到应用私信提醒；未配置或失败时留在这里，不影响招聘操作。
             </p>
           </div>
           <div className="notify-head-actions">
-            {isAdmin && (pendingCount > 0 || failedCount > 0) && (
+            {isAdmin && (sendablePending > 0 || sendableFailed > 0) && (
               <Button
                 size="sm"
                 variant="primary"
                 loading={outboxBusy === "dispatch"}
-                disabled={!feishu?.ready.notifications || outboxBusy !== null || sendingId !== null}
-                onClick={() => void dispatchBatch(pendingCount === 0)}
+                disabled={!(feishu?.ready.notifications || feishu?.ready.login) || outboxBusy !== null || sendingId !== null}
+                onClick={() => void dispatchBatch(sendablePending === 0)}
               >
-                {pendingCount > 0 ? "补发待发（最多 10 条）" : "重试失败（最多 10 条）"}
+                {sendablePending > 0 ? "补发待发（最多 10 条）" : "重试失败（最多 10 条）"}
               </Button>
             )}
             {isAdmin && pendingCount > 0 && (
@@ -397,6 +416,8 @@ export function SettingsPage({
           <ul className="notify-list">
             {(showAllNotifications ? notifications : notifications.slice(0, 5)).map((item) => {
               const status = NOTIFY_STATUS[item.status] ?? { label: item.status, tone: "neutral" as const };
+              const { delivery, recipientName } = parseNotificationDelivery(item.payload);
+              const deliveryReady = delivery === "dm" ? Boolean(feishu?.ready.login) : Boolean(feishu?.ready.notifications);
               const canSend = isAdmin && item.status !== "sent";
               const actionLabel = item.status === "failed" ? "重试" : item.status === "skipped" ? "重发" : "发送";
               return (
@@ -414,6 +435,9 @@ export function SettingsPage({
                     )}
                   </div>
                   <div className="notify-meta">
+                    <Badge tone={delivery === "dm" ? "brand" : "neutral"}>
+                      {delivery === "dm" ? (recipientName ? `私信 · ${recipientName}` : "面试官私信") : "群机器人"}
+                    </Badge>
                     <Badge tone={status.tone}>{status.label}</Badge>
                     {item.status === "failed" && item.attempts > 0 && (
                       <span className="muted">第 {item.attempts} 次</span>
@@ -423,7 +447,7 @@ export function SettingsPage({
                       <Button
                         size="sm"
                         loading={sendingId === item.id}
-                        disabled={!feishu?.ready.notifications || outboxBusy !== null || (sendingId !== null && sendingId !== item.id)}
+                        disabled={!deliveryReady || outboxBusy !== null || (sendingId !== null && sendingId !== item.id)}
                         onClick={() => void dispatchSingle(item)}
                       >
                         {actionLabel}
@@ -626,7 +650,13 @@ function AddMemberForm({
   );
 }
 
-function FeishuForm({ status, onSaved }: { status: FeishuStatus; onSaved: (next: FeishuStatus) => void }) {
+function FeishuForm({
+  status,
+  onSaved,
+}: {
+  status: FeishuStatus;
+  onSaved: (next: FeishuStatus, message?: string | null) => void;
+}) {
   const [form, setForm] = useState({
     app_id: "",
     app_secret: "",
@@ -636,7 +666,9 @@ function FeishuForm({ status, onSaved }: { status: FeishuStatus; onSaved: (next:
     calendar_id: "",
   });
   const [clearedKeys, setClearedKeys] = useState<Set<keyof typeof form>>(() => new Set());
-  const [busy, setBusy] = useState<"save" | "test-app" | "test-webhook" | null>(null);
+  const [busy, setBusy] = useState<"save" | "test-app" | "test-webhook" | "create-calendar" | "test-calendar" | null>(
+    null,
+  );
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const toast = useToast();
@@ -687,7 +719,7 @@ function FeishuForm({ status, onSaved }: { status: FeishuStatus; onSaved: (next:
     }
   }
 
-  async function runTest(kind: "test-app" | "test-webhook") {
+  async function runTest(kind: "test-app" | "test-webhook" | "create-calendar" | "test-calendar") {
     setBusy(kind);
     setError("");
     setNotice("");
@@ -697,14 +729,31 @@ function FeishuForm({ status, onSaved }: { status: FeishuStatus; onSaved: (next:
         const msg = `自建应用凭证连通成功 · ${res.latencyMs} 毫秒（${res.endpoint}，令牌有效约 ${Math.round(res.expiresIn / 60)} 分钟）`;
         setNotice(msg);
         toast.push("飞书自建应用凭证校验通过", "success");
-      } else {
+      } else if (kind === "test-webhook") {
         const res = await api.testFeishuWebhook();
         const msg = `测试卡片已发送到飞书群 · ${res.latencyMs} 毫秒${res.signed ? "（已启用签名校验）" : ""}`;
         setNotice(msg);
         toast.push("测试卡片已发送到飞书群", "success");
+      } else if (kind === "create-calendar") {
+        const res = await api.createFeishuCalendar();
+        onSaved(res.status, null);
+        setClearedKeys((prev) => {
+          if (!prev.has("calendar_id")) return prev;
+          const next = new Set(prev);
+          next.delete("calendar_id");
+          return next;
+        });
+        const msg = `已创建共享日历「${res.summary}」并自动保存日历 ID（${res.calendarId} · ${res.latencyMs} 毫秒）`;
+        setNotice(msg);
+        toast.push("已创建飞书招聘日历并自动保存", "success");
+      } else {
+        const res = await api.testFeishuCalendar();
+        const msg = `共享日历连通成功 · ${res.latencyMs} 毫秒（${res.summary}）`;
+        setNotice(msg);
+        toast.push("飞书共享日历校验通过", "success");
       }
     } catch (err) {
-      const message = err instanceof ApiError ? err.message : "连通测试失败";
+      const message = err instanceof ApiError ? err.message : "操作失败";
       setError(message);
       toast.push(message, "error");
     } finally {
@@ -746,10 +795,13 @@ function FeishuForm({ status, onSaved }: { status: FeishuStatus; onSaved: (next:
     },
     {
       key: "calendar_id",
-      label: "日历 ID",
-      placeholder: "面试日程同步用（阶段三），可留空",
+      label: "共享日历 ID",
+      placeholder: "可手填已有日历 ID，或保存 App 凭证后点击「一键创建招聘日历」",
       filled: status.fields.calendar_id,
       span: true,
+      hint: status.fields.calendar_id
+        ? "已保存共享日历 ID，面试安排/改期/取消将自动同步，未填会议链接时自动生成飞书视频会议"
+        : "配置后将自动同步面试日程、邀请已绑定飞书的面试官，并自动生成飞书视频会议链接",
     },
   ];
 
@@ -837,6 +889,22 @@ function FeishuForm({ status, onSaved }: { status: FeishuStatus; onSaved: (next:
           onClick={() => void runTest("test-webhook")}
         >
           发送测试消息
+        </Button>
+        <Button
+          type="button"
+          loading={busy === "create-calendar"}
+          disabled={!status.ready.login || busy !== null}
+          onClick={() => void runTest("create-calendar")}
+        >
+          一键创建招聘日历
+        </Button>
+        <Button
+          type="button"
+          loading={busy === "test-calendar"}
+          disabled={!status.ready.calendar || busy !== null}
+          onClick={() => void runTest("test-calendar")}
+        >
+          测试日历连接
         </Button>
         <span className="muted">{status.updatedAt ? `上次更新 ${fmtDateTime(status.updatedAt)}` : "尚未保存过配置"}</span>
       </div>

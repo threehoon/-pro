@@ -261,7 +261,7 @@ function formatShanghaiTime(iso: string): string {
 async function requestFeishuJson(
   url: string,
   options: {
-    method: 'GET' | 'POST';
+    method: 'GET' | 'POST' | 'PATCH' | 'DELETE';
     payload?: Record<string, unknown>;
     headers?: Record<string, string>;
     extraSecrets?: Array<string | null | undefined>;
@@ -332,6 +332,16 @@ export function isFeishuWebhookConfigured(): boolean {
   }
 }
 
+export function isFeishuAppConfigured(): boolean {
+  const { config } = readRaw();
+  return Boolean(config.app_id && config.app_secret);
+}
+
+export function isFeishuCalendarConfigured(): boolean {
+  const { config } = readRaw();
+  return Boolean(config.app_id && config.app_secret && config.calendar_id?.trim());
+}
+
 export function feishuStatus(): FeishuStatus {
   const raw = readRaw();
   const config = raw.config;
@@ -388,8 +398,8 @@ export function feishuStatus(): FeishuStatus {
       },
       {
         key: 'calendar',
-        label: '面试日历同步（阶段三）',
-        description: '配置共享日历 ID，创建面试时写入飞书日程，改期取消同步更新。',
+        label: '面试日历同步与面试官私信（阶段三）',
+        description: '配置或一键创建共享日历后，安排/改期/取消面试自动同步飞书日程与会议链接，并私信提醒已绑定飞书的面试官。',
         done: Boolean(calendarReady),
       },
       {
@@ -558,7 +568,7 @@ export async function testFeishuAppConnection(): Promise<{
 }
 
 /**
- * 飞书消息卡片（面试安排 / 面试改期）。
+ * 飞书消息卡片（面试安排 / 面试改期 / 面试取消）。
  */
 export function buildInterviewCard(input: {
   candidateName: string;
@@ -572,10 +582,13 @@ export function buildInterviewCard(input: {
   location?: string | null;
   workbenchUrl?: string | null;
   rescheduled?: boolean;
+  cancelled?: boolean;
+  note?: string | null;
+  directMessage?: boolean;
 }) {
   const dateText = formatShanghaiTime(input.scheduledAt);
   const actions: Array<Record<string, unknown>> = [];
-  if (isHttpUrl(input.meetingUrl)) {
+  if (!input.cancelled && isHttpUrl(input.meetingUrl)) {
     actions.push({
       tag: 'button',
       type: 'primary',
@@ -603,19 +616,41 @@ export function buildInterviewCard(input: {
     fields.push({ is_short: true, text: { tag: 'lark_md', content: `**地点**\n${input.location}` } });
   }
 
+  const template = input.cancelled ? 'red' : input.rescheduled ? 'orange' : 'blue';
+  const actionLabel = input.cancelled ? '面试取消' : input.rescheduled ? '面试改期' : '面试安排';
+  const titlePrefix = input.directMessage ? `${actionLabel}提醒` : actionLabel;
+  const extraElements: Array<Record<string, unknown>> = [];
+  if (input.note?.trim()) {
+    extraElements.push({
+      tag: 'div',
+      text: { tag: 'lark_md', content: `**说明**：${input.note.trim()}` },
+    });
+  }
+
   return {
     config: { wide_screen_mode: true },
     header: {
-      template: input.rescheduled ? 'orange' : 'blue',
+      template,
       title: {
         tag: 'plain_text',
-        content: `${input.rescheduled ? '面试改期' : '面试安排'} · ${input.candidateName}`,
+        content: `${titlePrefix} · ${input.candidateName}`,
       },
     },
     elements: [
       { tag: 'div', fields },
+      ...extraElements,
       ...(actions.length > 0 ? [{ tag: 'action', actions }] : []),
-      { tag: 'note', elements: [{ tag: 'plain_text', content: '由 Hireloop 招聘工作台发送' }] },
+      {
+        tag: 'note',
+        elements: [
+          {
+            tag: 'plain_text',
+            content: input.directMessage
+              ? '由 Hireloop 招聘工作台私信提醒（仅发送给本场面试官）'
+              : '由 Hireloop 招聘工作台发送',
+          },
+        ],
+      },
     ],
   };
 }
@@ -811,10 +846,12 @@ export async function testFeishuWebhook(actorName: string): Promise<{
 }
 
 /**
- * 兼容既有导出：阶段一通过已配置的机器人 Webhook 投递卡片；
- * 阶段二接入个人应用消息后再按 receiveId 路由。
+ * 兼容既有导出：传入 open_id 时发送应用私信卡片，否则走群机器人 Webhook。
  */
-export async function sendFeishuMessage(card: unknown, _receiveId: string | null): Promise<FeishuWebhookDeliveryResult> {
+export async function sendFeishuMessage(card: unknown, receiveId: string | null): Promise<FeishuWebhookDeliveryResult> {
+  if (receiveId?.trim()) {
+    return sendFeishuDirectMessageCard(receiveId.trim(), card);
+  }
   return sendFeishuWebhookCard(card);
 }
 
@@ -948,5 +985,432 @@ export async function exchangeFeishuOAuthCode(code: string): Promise<FeishuOAuth
     email: readOptionalString(userData?.email),
     enterpriseEmail: readOptionalString(userData?.enterprise_email),
     avatarUrl: readOptionalString(userData?.avatar_url),
+  };
+}
+
+interface TenantApiCallResult {
+  ok: boolean;
+  status: number;
+  code: number | null;
+  msg: string;
+  data: Record<string, unknown> | null;
+  latencyMs: number;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+async function callFeishuTenantApi(
+  path: string,
+  options: {
+    method: 'GET' | 'POST' | 'PATCH' | 'DELETE';
+    payload?: Record<string, unknown>;
+    extraSecrets?: Array<string | null | undefined>;
+  },
+): Promise<TenantApiCallResult> {
+  const { config } = readRaw();
+  const { origin } = resolveOpenApiOrigin(config);
+  const tokenResult = await getTenantAccessToken();
+  const extraSecrets = [tokenResult.token, ...(options.extraSecrets ?? [])];
+  const response = await requestFeishuJson(`${origin}${path}`, {
+    method: options.method,
+    headers: { authorization: `Bearer ${tokenResult.token}` },
+    payload: options.payload,
+    extraSecrets,
+  });
+  const code = typeof response.data?.code === 'number' ? response.data.code : null;
+  const msg = typeof response.data?.msg === 'string' ? sanitizeDiagnostic(response.data.msg, extraSecrets) : '';
+  const data = asRecord(response.data?.data);
+  return {
+    ok: response.ok && code === 0,
+    status: response.status,
+    code,
+    msg,
+    data,
+    latencyMs: response.latencyMs,
+  };
+}
+
+function formatFeishuErrorDetail(res: Pick<TenantApiCallResult, 'status' | 'code' | 'msg'>): string {
+  return res.code !== null ? `code ${res.code}${res.msg ? `：${res.msg}` : ''}` : `HTTP ${res.status}`;
+}
+
+/**
+ * 「这条日程不存在」：只认 193001（event not found）。
+ * 飞书 404 集合里还有 190007（app bot_id not found）、191000（日历不存在）、195100（用户已退出/不在租户），
+ * 它们都不代表事件已经不存在：当作成功会清掉事件引用，当作不存在会重复建日程。
+ * 190002 是「请求参数非法」(400)，同样不能触发重建。
+ */
+function isCalendarEventNotFound(res: Pick<TenantApiCallResult, 'code'>): boolean {
+  return res.code === 193001;
+}
+
+/** 远端日程已被别人删除（403 193003）：删除按幂等成功处理，更新则改走新建。 */
+function isCalendarEventDeleted(res: Pick<TenantApiCallResult, 'code'>): boolean {
+  return res.code === 193003;
+}
+
+/**
+ * 日历级错误（日历不存在/ID 非法/无权限/日历已删除/类型不合法）：重试没用，需要人去设置页修日历配置。
+ */
+function isCalendarConfigError(res: Pick<TenantApiCallResult, 'code'>): boolean {
+  return (
+    res.code === 191000 || res.code === 191001 || res.code === 191002 || res.code === 191003 || res.code === 191004
+  );
+}
+
+/**
+ * 通过飞书自建应用向指定成员（open_id）发送交互卡片私信。
+ * 用于面试官私信提醒，不刷大群；未配置应用凭证或无 open_id 时安全返回 skipped。
+ */
+export async function sendFeishuDirectMessageCard(
+  openId: string,
+  card: unknown,
+): Promise<FeishuWebhookDeliveryResult> {
+  const trimmedOpenId = openId.trim();
+  if (!trimmedOpenId) {
+    return { ok: false, skipped: true, reason: '面试官尚未绑定飞书账号' };
+  }
+  if (!isFeishuAppConfigured()) {
+    return { ok: false, skipped: true, reason: '未配置飞书自建应用凭证' };
+  }
+
+  let res: TenantApiCallResult;
+  try {
+    res = await callFeishuTenantApi('/open-apis/im/v1/messages?receive_id_type=open_id', {
+      method: 'POST',
+      payload: {
+        receive_id: trimmedOpenId,
+        msg_type: 'interactive',
+        content: JSON.stringify(card),
+      },
+    });
+  } catch (error) {
+    return {
+      ok: false,
+      reason: error instanceof Error ? error.message : '飞书应用私信发送失败',
+    };
+  }
+
+  if (res.ok) {
+    return { ok: true, latencyMs: res.latencyMs };
+  }
+  return {
+    ok: false,
+    latencyMs: res.latencyMs,
+    reason: `飞书应用私信发送失败（${formatFeishuErrorDetail(res)}）`,
+  };
+}
+
+/** 管理员在设置页一键创建 Hireloop 专用共享日历，并自动回填 calendar_id。 */
+export async function createFeishuSharedCalendar(
+  actorId: string,
+  input: { summary?: string; description?: string } = {},
+): Promise<{
+  ok: true;
+  calendarId: string;
+  summary: string;
+  latencyMs: number;
+  status: FeishuStatus;
+}> {
+  if (!isFeishuAppConfigured()) {
+    throw badRequest('请先填写并保存飞书自建应用的 App ID 和 App Secret');
+  }
+  const summary = input.summary?.trim() || 'Hireloop 招聘面试';
+  const description = input.description?.trim() || '由 Hireloop 招聘工作台自动同步的面试日程';
+
+  let res: TenantApiCallResult;
+  try {
+    res = await callFeishuTenantApi('/open-apis/calendar/v4/calendars', {
+      method: 'POST',
+      payload: {
+        summary,
+        description,
+        permissions: 'private',
+        summary_alias: summary,
+      },
+    });
+  } catch (error) {
+    throw badRequest(error instanceof Error ? error.message : '创建飞书共享日历失败');
+  }
+
+  const calendarObj = asRecord(res.data?.calendar);
+  const calendarId = readOptionalString(calendarObj?.calendar_id) ?? readOptionalString(res.data?.calendar_id);
+  if (!res.ok || !calendarId) {
+    throw badRequest(`创建飞书共享日历失败（${formatFeishuErrorDetail(res)}）`);
+  }
+
+  const savedSummary = readOptionalString(calendarObj?.summary) ?? summary;
+  const status = saveFeishuConfig({ calendar_id: calendarId }, actorId);
+  return {
+    ok: true,
+    calendarId,
+    summary: savedSummary,
+    latencyMs: res.latencyMs,
+    status,
+  };
+}
+
+/** 管理员主动测试已配置的飞书共享日历是否可访问。 */
+export async function testFeishuCalendarConnection(): Promise<{
+  ok: true;
+  calendarId: string;
+  summary: string;
+  latencyMs: number;
+}> {
+  if (!isFeishuAppConfigured()) {
+    throw badRequest('请先填写并保存飞书自建应用的 App ID 和 App Secret');
+  }
+  const { config } = readRaw();
+  const calendarId = config.calendar_id?.trim();
+  if (!calendarId) {
+    throw badRequest('请先填写共享日历 ID，或点击「一键创建招聘日历」');
+  }
+
+  let res: TenantApiCallResult;
+  try {
+    res = await callFeishuTenantApi(`/open-apis/calendar/v4/calendars/${encodeURIComponent(calendarId)}`, {
+      method: 'GET',
+    });
+  } catch (error) {
+    throw badRequest(error instanceof Error ? error.message : '飞书日历连通测试失败');
+  }
+
+  if (!res.ok) {
+    throw badRequest(`飞书日历访问失败（${formatFeishuErrorDetail(res)}）`);
+  }
+  const calendarObj = asRecord(res.data?.calendar);
+  const summary =
+    readOptionalString(calendarObj?.summary) ??
+    readOptionalString(res.data?.summary) ??
+    'Hireloop 招聘面试';
+  return {
+    ok: true,
+    calendarId,
+    summary,
+    latencyMs: res.latencyMs,
+  };
+}
+
+export interface FeishuCalendarSyncResult {
+  ok: boolean;
+  skipped?: boolean;
+  eventId?: string | null;
+  meetingUrl?: string | null;
+  reason?: string;
+}
+
+/**
+ * 将单场面试同步到飞书共享日历（创建 / 更新 / 删除），并同步已绑定飞书的面试官参与人；
+ * 当形式为视频面试且未手填会议链接时，开启飞书自动生成视频会议链接并回传 meetingUrl。
+ */
+export async function syncFeishuCalendarEvent(input: {
+  action: 'upsert' | 'delete';
+  existingEventId: string | null;
+  summary: string;
+  description: string;
+  startAt: string;
+  durationMinutes: number;
+  mode: 'onsite' | 'video' | 'phone';
+  location: string | null;
+  meetingUrl: string | null;
+  attendeeOpenIds: string[];
+  previousAttendeeOpenIds?: string[];
+}): Promise<FeishuCalendarSyncResult> {
+  if (!isFeishuCalendarConfigured()) {
+    return { ok: false, skipped: true, reason: '未配置飞书自建应用凭证或共享日历 ID' };
+  }
+  const { config } = readRaw();
+  const calendarId = config.calendar_id!.trim();
+  const encodedCalendarId = encodeURIComponent(calendarId);
+
+  if (input.action === 'delete') {
+    if (!input.existingEventId) {
+      return { ok: true, skipped: true, eventId: null };
+    }
+    try {
+      const res = await callFeishuTenantApi(
+        `/open-apis/calendar/v4/calendars/${encodedCalendarId}/events/${encodeURIComponent(input.existingEventId)}?need_notification=true`,
+        { method: 'DELETE' },
+      );
+      // 远端已经不存在（193001）或已被删除（193003）都算删掉了
+      if (res.ok || isCalendarEventNotFound(res) || isCalendarEventDeleted(res)) {
+        return { ok: true, eventId: null };
+      }
+      if (isCalendarConfigError(res)) {
+        return {
+          ok: false,
+          eventId: input.existingEventId,
+          reason: `删除飞书日程失败：日历不可用（${formatFeishuErrorDetail(res)}），请在设置页检查或重新创建招聘日历`,
+        };
+      }
+      return {
+        ok: false,
+        eventId: input.existingEventId,
+        reason: `删除飞书日程失败（${formatFeishuErrorDetail(res)}）`,
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        eventId: input.existingEventId,
+        reason: error instanceof Error ? error.message : '删除飞书日程失败',
+      };
+    }
+  }
+
+  const startMs = new Date(input.startAt).getTime();
+  if (Number.isNaN(startMs)) {
+    return { ok: false, reason: '面试时间无效，无法写入飞书日程' };
+  }
+  const durationMinutes = Math.max(15, Math.min(480, Math.round(input.durationMinutes || 45)));
+  const startSec = String(Math.floor(startMs / 1000));
+  const endSec = String(Math.floor((startMs + durationMinutes * 60_000) / 1000));
+
+  const payload: Record<string, unknown> = {
+    summary: input.summary,
+    description: input.description,
+    start_time: { timestamp: startSec, timezone: 'Asia/Shanghai' },
+    end_time: { timestamp: endSec, timezone: 'Asia/Shanghai' },
+    need_notification: true,
+    attendee_ability: 'can_see_others',
+  };
+  if (input.mode === 'onsite') {
+    if (input.location?.trim()) payload.location = { name: input.location.trim() };
+    // 由视频改为现场/电话时必须显式关闭视频会议，否则飞书日程会保留旧会议入口
+    payload.vchat = { vc_type: 'no_meeting' };
+  } else if (input.mode === 'video') {
+    if (isHttpUrl(input.meetingUrl)) {
+      payload.vchat = {
+        vc_type: 'third_party',
+        meeting_url: input.meetingUrl,
+        description: 'Hireloop 面试视频会议',
+      };
+    } else {
+      payload.vchat = { vc_type: 'vc' };
+    }
+  } else {
+    payload.vchat = { vc_type: 'no_meeting' };
+  }
+
+  let res: TenantApiCallResult;
+  let updatedExisting = false;
+  try {
+    if (input.existingEventId) {
+      res = await callFeishuTenantApi(
+        `/open-apis/calendar/v4/calendars/${encodedCalendarId}/events/${encodeURIComponent(input.existingEventId)}`,
+        { method: 'PATCH', payload },
+      );
+      if (res.ok) {
+        updatedExisting = true;
+      } else if (isCalendarEventNotFound(res) || isCalendarEventDeleted(res)) {
+        res = await callFeishuTenantApi(`/open-apis/calendar/v4/calendars/${encodedCalendarId}/events`, {
+          method: 'POST',
+          payload,
+        });
+      }
+    } else {
+      res = await callFeishuTenantApi(`/open-apis/calendar/v4/calendars/${encodedCalendarId}/events`, {
+        method: 'POST',
+        payload,
+      });
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      eventId: input.existingEventId,
+      reason: error instanceof Error ? error.message : '同步飞书日程失败',
+    };
+  }
+
+  const eventObj = asRecord(res.data?.event);
+  const eventId = readOptionalString(eventObj?.event_id) ?? (updatedExisting ? input.existingEventId : null);
+  if (!res.ok || !eventId) {
+    const hint = isCalendarConfigError(res) ? '，日历不可用，请在设置页检查或重新创建招聘日历' : '';
+    return {
+      ok: false,
+      eventId: input.existingEventId,
+      reason: `同步飞书日程失败（${formatFeishuErrorDetail(res)}）${hint}`,
+    };
+  }
+
+  const vchatObj = asRecord(eventObj?.vchat);
+  const returnedUrl = readOptionalString(vchatObj?.meeting_url);
+  const generatedMeetingUrl = isHttpUrl(returnedUrl) ? returnedUrl : null;
+
+  const desiredOpenIds = Array.from(new Set(input.attendeeOpenIds.map((item) => item.trim()).filter(Boolean)));
+  const removedOpenIds = Array.from(
+    new Set(
+      (input.previousAttendeeOpenIds ?? [])
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0 && !desiredOpenIds.includes(item)),
+    ),
+  );
+
+  if (desiredOpenIds.length > 0) {
+    try {
+      const addRes = await callFeishuTenantApi(
+        `/open-apis/calendar/v4/calendars/${encodedCalendarId}/events/${encodeURIComponent(eventId)}/attendees?user_id_type=open_id`,
+        {
+          method: 'POST',
+          payload: {
+            attendees: desiredOpenIds.map((userId) => ({ type: 'user', user_id: userId })),
+            need_notification: true,
+          },
+        },
+      );
+      if (!addRes.ok) {
+        return {
+          ok: false,
+          eventId,
+          meetingUrl: generatedMeetingUrl,
+          reason: `日程已写入，但添加面试官参与人失败（${formatFeishuErrorDetail(addRes)}）`,
+        };
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        eventId,
+        meetingUrl: generatedMeetingUrl,
+        reason: `日程已写入，但添加面试官参与人失败：${error instanceof Error ? error.message : '网络错误'}`,
+      };
+    }
+  }
+
+  if (updatedExisting && removedOpenIds.length > 0) {
+    // 旧面试官没能移出日程时必须报失败，调用方会保留旧参与人记录以便下次重试移除
+    try {
+      const removeRes = await callFeishuTenantApi(
+        `/open-apis/calendar/v4/calendars/${encodedCalendarId}/events/${encodeURIComponent(eventId)}/attendees/batch_delete?user_id_type=open_id`,
+        {
+          method: 'POST',
+          payload: {
+            delete_ids: removedOpenIds.map((userId) => ({ type: 'user', user_id: userId })),
+            need_notification: true,
+          },
+        },
+      );
+      if (!removeRes.ok) {
+        return {
+          ok: false,
+          eventId,
+          meetingUrl: generatedMeetingUrl,
+          reason: `日程已更新，但移除原面试官失败（${formatFeishuErrorDetail(removeRes)}）`,
+        };
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        eventId,
+        meetingUrl: generatedMeetingUrl,
+        reason: `日程已更新，但移除原面试官失败：${error instanceof Error ? error.message : '网络错误'}`,
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    eventId,
+    meetingUrl: generatedMeetingUrl,
   };
 }

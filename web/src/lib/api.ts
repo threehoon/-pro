@@ -240,6 +240,8 @@ export const api = {
     request<{ interview: Interview; application: ApplicationDetail["application"]; offer: OfferData["offer"] }>("POST", `/interviews/${id}/decide`, { decision, ...options }),
   cancelInterview: (id: string) => request<{ interview: Interview }>("POST", `/interviews/${id}/cancel`),
   noShow: (id: string) => request<{ interview: Interview }>("POST", `/interviews/${id}/no-show`),
+  syncInterviewCalendar: (id: string) =>
+    request<import("../types").InterviewCalendarSyncResult>("POST", `/interviews/${id}/sync-calendar`, {}),
 
   notifications: (options: { channel?: string; limit?: number } = {}) =>
     request<{ items: import("../types").NotificationItem[]; stats: Record<string, number> }>(
@@ -255,6 +257,10 @@ export const api = {
   testFeishuApp: () => request<import("../types").FeishuAppTestResult>("POST", "/settings/feishu/test-app", {}),
   testFeishuWebhook: () =>
     request<import("../types").FeishuWebhookTestResult>("POST", "/settings/feishu/test-webhook", {}),
+  createFeishuCalendar: (input?: { summary?: string; description?: string }) =>
+    request<import("../types").FeishuCalendarCreateResult>("POST", "/settings/feishu/create-calendar", input ?? {}),
+  testFeishuCalendar: () =>
+    request<import("../types").FeishuCalendarTestResult>("POST", "/settings/feishu/test-calendar", {}),
   dispatchFeishuNotifications: (input?: { notificationId?: string; limit?: number; includeFailed?: boolean }) =>
     request<import("../types").FeishuDispatchResult>("POST", "/notifications/feishu/dispatch", input ?? {}),
   skipPendingFeishuNotifications: (input?: { notificationId?: string }) =>

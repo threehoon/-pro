@@ -194,6 +194,8 @@ export interface ApplicationDetail {
   interviews: Interview[];
 }
 
+export type CalendarSyncStatus = "none" | "pending" | "synced" | "failed";
+
 export interface Interview {
   id: string;
   application_id: string;
@@ -211,6 +213,10 @@ export interface Interview {
   interviewer_id: string | null;
   interviewer_name: string | null;
   status: InterviewStatus;
+  external_calendar_event_id?: string | null;
+  calendar_sync_status?: CalendarSyncStatus;
+  calendar_sync_error?: string | null;
+  calendar_synced_at?: string | null;
   score: number | null;
   feedback: string | null;
   recommendation: string | null;
@@ -338,6 +344,31 @@ export interface FeishuWebhookTestResult {
   ok: true;
   latencyMs: number;
   signed: boolean;
+}
+
+export interface FeishuCalendarCreateResult {
+  ok: true;
+  calendarId: string;
+  summary: string;
+  latencyMs: number;
+  status: FeishuStatus;
+}
+
+export interface FeishuCalendarTestResult {
+  ok: true;
+  calendarId: string;
+  summary: string;
+  latencyMs: number;
+}
+
+export interface InterviewCalendarSyncResult {
+  interview: Interview;
+  sync: {
+    ok: boolean;
+    skipped?: boolean;
+    error?: string | null;
+    meetingUrl?: string | null;
+  };
 }
 
 export interface FeishuDispatchResult {

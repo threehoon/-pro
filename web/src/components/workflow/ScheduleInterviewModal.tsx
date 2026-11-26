@@ -152,8 +152,8 @@ export function ScheduleInterviewModal({
             {(id) => <Input id={id} value={location} onChange={(event) => setLocation(event.target.value)} placeholder="如：3 号楼 5 层会议室" />}
           </Field>
         ) : (
-          <Field label="会议链接">
-            {(id) => <Input id={id} value={meetingUrl} onChange={(event) => setMeetingUrl(event.target.value)} placeholder="飞书会议或腾讯会议链接" />}
+          <Field label="会议链接" hint="留空时若已接通飞书日历，将自动生成飞书视频会议链接">
+            {(id) => <Input id={id} value={meetingUrl} onChange={(event) => setMeetingUrl(event.target.value)} placeholder="留空自动生成，或填写飞书/腾讯会议链接" />}
           </Field>
         )}
       </div>

@@ -1,8 +1,8 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Badge, Button, ErrorState, Field, Input, ListSkeleton, Modal, Select, Textarea, useConfirm } from "../ui";
 import { api } from "../../lib/api";
 import { fmtDateTime, interviewTitle } from "../../lib/format";
-import { apiMessage } from "../../lib/workflow";
+import { apiMessage, calendarSyncBadge, safeMeetingUrl } from "../../lib/workflow";
 import type { Interview } from "../../types";
 import type { AiStatus, ComparativePoint, WorkflowDecision } from "../../workflowTypes";
 import { requireAiResult, useWorkflowResource } from "./resource";
@@ -24,6 +24,11 @@ export function InterviewDrawer({ interview, canWrite, rejectionReasons, onClose
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
+  const [liveInterview, setLiveInterview] = useState<Interview>(interview);
+  // 父级刷新后传入新行时同步本地快照，避免日历徽标与会议链接停留在旧状态
+  useEffect(() => {
+    setLiveInterview(interview);
+  }, [interview]);
   const confirm = useConfirm();
   const fetchSummary = useCallback(async () => {
     const result = await api.interviewSummary(interview.id);
@@ -78,9 +83,61 @@ export function InterviewDrawer({ interview, canWrite, rejectionReasons, onClose
     });
   }
 
-  return <Modal open onClose={onClose} variant="drawer" width={640} title={interviewTitle(interview.title, interview.round)}
-    description={[interview.candidate_name, interview.job_title, interview.is_draft ? "复试待安排" : fmtDateTime(interview.scheduled_at)].filter(Boolean).join(" · ")}>
+  const calBadge = calendarSyncBadge(liveInterview.calendar_sync_status);
+  const meetingUrl = liveInterview.status === "cancelled" ? null : safeMeetingUrl(liveInterview.meeting_url);
+
+  async function syncCalendar() {
+    setBusy("calendar");
+    setError("");
+    setNotice("");
+    const previousMeetingUrl = liveInterview.meeting_url?.trim() || null;
+    try {
+      const res = await api.syncInterviewCalendar(liveInterview.id);
+      setLiveInterview(res.interview);
+      if (res.sync.ok) {
+        const nextMeetingUrl = res.interview.meeting_url?.trim() || null;
+        // 只有此前没有链接、这次才拿到飞书自动生成的链接时，才说「回填」
+        const backfilled = Boolean(nextMeetingUrl) && nextMeetingUrl !== previousMeetingUrl;
+        setNotice(backfilled ? "已同步飞书日历并回填飞书视频会议链接。" : "已同步到飞书日历。");
+      } else {
+        setError(res.sync.error || "飞书日历同步失败");
+      }
+      onChange();
+    } catch (err) {
+      setError(apiMessage(err, "飞书日历同步失败"));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  return <Modal open onClose={onClose} variant="drawer" width={640} title={interviewTitle(liveInterview.title, liveInterview.round)}
+    description={[liveInterview.candidate_name, liveInterview.job_title, liveInterview.is_draft ? "复试待安排" : fmtDateTime(liveInterview.scheduled_at)].filter(Boolean).join(" · ")}>
     <div className="workflow-stack interview-drawer">
+      {!liveInterview.is_draft && (meetingUrl || calBadge) && (
+        <section className="interview-sync-bar">
+          <div className="interview-sync-main">
+            {calBadge && <Badge tone={calBadge.tone}>{calBadge.label}</Badge>}
+            {meetingUrl && (
+              <a className="interview-sync-link" href={meetingUrl} target="_blank" rel="noreferrer">
+                打开会议链接
+              </a>
+            )}
+            {liveInterview.calendar_synced_at && liveInterview.calendar_sync_status === "synced" && (
+              <span className="muted">同步于 {fmtDateTime(liveInterview.calendar_synced_at)}</span>
+            )}
+          </div>
+          {canWrite && calBadge && (
+            <Button size="sm" loading={busy === "calendar"} disabled={!!busy} onClick={() => void syncCalendar()}>
+              {liveInterview.calendar_sync_status === "failed" ? "重试同步日历" : "重新同步日历"}
+            </Button>
+          )}
+          {liveInterview.calendar_sync_status === "failed" && liveInterview.calendar_sync_error && (
+            <p className="form-error interview-sync-error" role="alert">
+              日历同步失败：{liveInterview.calendar_sync_error}
+            </p>
+          )}
+        </section>
+      )}
       {!resource.data && !resource.error && <ListSkeleton rows={2} />}
       {resource.error && <ErrorState message={resource.error} onRetry={resource.reload} />}
       {pollPlan && <p className="muted" role="status">正在准备本轮提问提纲…</p>}

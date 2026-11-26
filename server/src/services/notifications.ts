@@ -6,7 +6,9 @@ import {
   buildGenericNotificationCard,
   buildInterviewCard,
   buildStageChangeCard,
+  isFeishuAppConfigured,
   isFeishuWebhookConfigured,
+  sendFeishuDirectMessageCard,
   sendFeishuWebhookCard,
 } from '../integrations/feishu.ts';
 
@@ -59,9 +61,36 @@ export async function waitForFeishuDispatches(): Promise<void> {
   }
 }
 
+type FeishuDeliveryKind = 'webhook' | 'dm';
+
+function getNotificationDelivery(row: Pick<NotificationRow, 'payload'>): FeishuDeliveryKind {
+  const payload = jsonParse<Record<string, unknown>>(row.payload, {});
+  return payload.delivery === 'dm' ? 'dm' : 'webhook';
+}
+
+function isFeishuDeliveryReady(delivery: FeishuDeliveryKind): boolean {
+  return delivery === 'dm' ? isFeishuAppConfigured() : isFeishuWebhookConfigured();
+}
+
+function lookupBoundFeishuUser(userId: string | null | undefined): { name: string; feishu_open_id: string } | null {
+  if (!userId) return null;
+  const user = getRow<{ name: string; feishu_open_id: string | null }>(
+    'SELECT name, feishu_open_id FROM users WHERE id = ?',
+    [userId],
+  );
+  if (!user?.feishu_open_id?.trim()) return null;
+  return { name: user.name, feishu_open_id: user.feishu_open_id.trim() };
+}
+
 function scheduleFeishuAutoDispatch(notificationId: string): void {
   if (!isDbOpen()) return;
-  if (!isFeishuWebhookConfigured()) return;
+  const row = getRow<Pick<NotificationRow, 'channel' | 'payload'>>(
+    'SELECT channel, payload FROM notifications WHERE id = ?',
+    [notificationId],
+  );
+  if (!row || row.channel !== 'feishu') return;
+  const delivery = getNotificationDelivery(row);
+  if (!isFeishuDeliveryReady(delivery)) return;
   const task = dispatchFeishuNotification(notificationId, {
     allowRetryFailed: false,
     allowSkipped: false,
@@ -74,9 +103,16 @@ function scheduleFeishuAutoDispatch(notificationId: string): void {
   });
 }
 
+/** 供面试日历异步同步完成后触发已延后的飞书通知自动发送（确保卡片携带自动生成的会议链接）。 */
+export function scheduleFeishuAutoDispatchIds(notificationIds: string[]): void {
+  for (const notificationId of notificationIds) {
+    scheduleFeishuAutoDispatch(notificationId);
+  }
+}
+
 /**
  * 通知出站箱：业务只负责登记「发生了什么」，
- * 飞书通道在已配置 Webhook 时于事务提交后异步投递；未配置或失败时留在出站箱，绝不阻塞业务流转。
+ * 飞书通道在已配置对应凭证时于事务提交后异步投递；未配置或失败时留在出站箱，绝不阻塞业务流转。
  */
 export function enqueueNotification(input: {
   eventKey: string;
@@ -86,6 +122,7 @@ export function enqueueNotification(input: {
   payload?: Record<string, unknown>;
   targetUserId?: string | null;
   channel?: NotificationChannel;
+  autoDispatch?: boolean;
 }): NotificationRow {
   const notificationId = id('ntf');
   const channel = input.channel ?? 'inapp';
@@ -106,7 +143,7 @@ export function enqueueNotification(input: {
     ],
   );
   const row = getRow<NotificationRow>('SELECT * FROM notifications WHERE id = ?', [notificationId])!;
-  if (channel === 'feishu') {
+  if (channel === 'feishu' && input.autoDispatch !== false) {
     afterCommit(() => scheduleFeishuAutoDispatch(notificationId));
   }
   return row;
@@ -155,6 +192,7 @@ export function notifyStageChange(input: {
     targetUserId: input.recipientId,
     channel: 'feishu',
     payload: {
+      delivery: 'webhook',
       applicationId: input.applicationId,
       jobTitle: input.jobTitle,
       candidateName: input.candidateName,
@@ -163,6 +201,65 @@ export function notifyStageChange(input: {
       rejected: input.rejected ?? false,
     },
   });
+}
+
+function enqueueInterviewEventChannels(input: {
+  eventKey: string;
+  type: 'interview.scheduled' | 'interview.cancelled';
+  title: string;
+  body: string;
+  interviewerId: string | null;
+  actorId: string;
+  autoDispatch?: boolean;
+  basePayload: Record<string, unknown>;
+}): string[] {
+  const feishuIds: string[] = [];
+
+  enqueueNotification({
+    eventKey: input.eventKey,
+    type: input.type,
+    title: input.title,
+    body: input.body,
+    targetUserId: input.interviewerId,
+    payload: input.basePayload,
+  });
+
+  const webhookRow = enqueueNotification({
+    eventKey: input.eventKey,
+    type: input.type,
+    title: input.title,
+    body: input.body,
+    targetUserId: input.interviewerId,
+    channel: 'feishu',
+    autoDispatch: input.autoDispatch,
+    payload: {
+      delivery: 'webhook',
+      ...input.basePayload,
+      actorId: input.actorId,
+    },
+  });
+  feishuIds.push(webhookRow.id);
+
+  const boundInterviewer = lookupBoundFeishuUser(input.interviewerId);
+  if (boundInterviewer) {
+    const dmRow = enqueueNotification({
+      eventKey: `${input.eventKey}:dm`,
+      type: input.type,
+      title: input.title,
+      body: `${input.body} · 面试官：${boundInterviewer.name}`,
+      targetUserId: input.interviewerId,
+      channel: 'feishu',
+      autoDispatch: input.autoDispatch,
+      payload: {
+        delivery: 'dm',
+        recipientName: boundInterviewer.name,
+        ...input.basePayload,
+        actorId: input.actorId,
+      },
+    });
+    feishuIds.push(dmRow.id);
+  }
+  return feishuIds;
 }
 
 export function notifyInterviewScheduled(input: {
@@ -174,20 +271,23 @@ export function notifyInterviewScheduled(input: {
   interviewerId: string | null;
   actorId: string;
   rescheduled?: boolean;
-}): void {
+  autoDispatch?: boolean;
+}): string[] {
   const eventKey = `interview:${input.interviewId}:scheduled:${Date.now()}`;
   const title = input.rescheduled
     ? `面试改期：${input.candidateName} · ${input.jobTitle}`
     : `面试安排：${input.candidateName} · ${input.jobTitle}`;
   const when = new Date(input.scheduledAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
 
-  enqueueNotification({
+  return enqueueInterviewEventChannels({
     eventKey,
     type: 'interview.scheduled',
     title,
     body: `时间：${when}`,
-    targetUserId: input.interviewerId,
-    payload: {
+    interviewerId: input.interviewerId,
+    actorId: input.actorId,
+    autoDispatch: input.autoDispatch,
+    basePayload: {
       interviewId: input.interviewId,
       applicationId: input.applicationId,
       scheduledAt: input.scheduledAt,
@@ -196,29 +296,49 @@ export function notifyInterviewScheduled(input: {
       rescheduled: Boolean(input.rescheduled),
     },
   });
-  enqueueNotification({
+}
+
+export function notifyInterviewCancelled(input: {
+  interviewId: string;
+  applicationId: string;
+  candidateName: string;
+  jobTitle: string;
+  scheduledAt: string;
+  interviewerId: string | null;
+  actorId: string;
+  note?: string | null;
+  autoDispatch?: boolean;
+}): string[] {
+  const eventKey = `interview:${input.interviewId}:cancelled:${Date.now()}`;
+  const title = `面试取消：${input.candidateName} · ${input.jobTitle}`;
+  const when = new Date(input.scheduledAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+  const note = input.note?.trim() || null;
+  const body = note ? `原定时间：${when} · 原因：${note}` : `原定时间：${when}`;
+
+  return enqueueInterviewEventChannels({
     eventKey,
-    type: 'interview.scheduled',
+    type: 'interview.cancelled',
     title,
-    body: `时间：${when}`,
-    targetUserId: input.interviewerId,
-    channel: 'feishu',
-    payload: {
+    body,
+    interviewerId: input.interviewerId,
+    actorId: input.actorId,
+    autoDispatch: input.autoDispatch,
+    basePayload: {
       interviewId: input.interviewId,
       applicationId: input.applicationId,
       scheduledAt: input.scheduledAt,
       candidateName: input.candidateName,
       jobTitle: input.jobTitle,
-      rescheduled: Boolean(input.rescheduled),
-      actorId: input.actorId,
+      note,
     },
   });
 }
 
 function buildCardForNotification(row: NotificationRow): unknown {
   const payload = notificationPayload(row);
+  const directMessage = getNotificationDelivery(row) === 'dm';
 
-  if (row.type === 'interview.scheduled') {
+  if (row.type === 'interview.scheduled' || row.type === 'interview.cancelled') {
     const interviewId = typeof payload.interviewId === 'string' ? payload.interviewId : null;
     const detail = interviewId
       ? getRow<{
@@ -261,7 +381,10 @@ function buildCardForNotification(row: NotificationRow): unknown {
       interviewerName: detail?.interviewer_name ?? null,
       meetingUrl: detail?.meeting_url ?? null,
       location: detail?.location ?? null,
-      rescheduled: Boolean(payload.rescheduled) || row.title.startsWith('面试改期'),
+      rescheduled: row.type === 'interview.scheduled' && (Boolean(payload.rescheduled) || row.title.startsWith('面试改期')),
+      cancelled: row.type === 'interview.cancelled',
+      note: typeof payload.note === 'string' ? payload.note : null,
+      directMessage,
     });
   }
 
@@ -313,12 +436,29 @@ export async function dispatchFeishuNotification(
     if (row.status === 'skipped' && !options.allowSkipped) {
       return { id: row.id, status: 'skipped', ok: false, skipped: true, error: row.last_error };
     }
-    if (!isFeishuWebhookConfigured()) {
-      return { id: row.id, status: row.status, ok: false, skipped: true, error: '未配置机器人 Webhook' };
-    }
 
-    const card = buildCardForNotification(row);
-    const result = await sendFeishuWebhookCard(card);
+    const delivery = getNotificationDelivery(row);
+    let result: Awaited<ReturnType<typeof sendFeishuWebhookCard>>;
+
+    if (delivery === 'dm') {
+      if (!isFeishuAppConfigured()) {
+        return { id: row.id, status: row.status, ok: false, skipped: true, error: '未配置飞书自建应用凭证' };
+      }
+      const boundUser = lookupBoundFeishuUser(row.target_user_id);
+      if (!boundUser) {
+        const reason = '面试官未绑定飞书账号';
+        run("UPDATE notifications SET status = 'skipped', last_error = ? WHERE id = ?", [reason, row.id]);
+        return { id: row.id, status: 'skipped', ok: false, skipped: true, error: reason };
+      }
+      const card = buildCardForNotification(row);
+      result = await sendFeishuDirectMessageCard(boundUser.feishu_open_id, card);
+    } else {
+      if (!isFeishuWebhookConfigured()) {
+        return { id: row.id, status: row.status, ok: false, skipped: true, error: '未配置机器人 Webhook' };
+      }
+      const card = buildCardForNotification(row);
+      result = await sendFeishuWebhookCard(card);
+    }
 
     if (!isDbOpen()) {
       return { id: row.id, status: row.status, ok: false, skipped: true, error: '数据库已关闭' };
@@ -364,14 +504,16 @@ export async function dispatchFeishuOutbox(input: {
   limit?: number;
   includeFailed?: boolean;
 } = {}): Promise<FeishuDispatchSummary> {
-  if (!isFeishuWebhookConfigured()) {
-    throw badRequest('请先填写并保存有效的飞书机器人 Webhook');
-  }
-
   if (input.notificationId) {
     const existing = getRow<NotificationRow>('SELECT * FROM notifications WHERE id = ?', [input.notificationId]);
     if (!existing) throw notFound('通知记录不存在');
     if (existing.channel !== 'feishu') throw badRequest('仅支持发送飞书出站消息');
+    const delivery = getNotificationDelivery(existing);
+    if (!isFeishuDeliveryReady(delivery)) {
+      throw badRequest(
+        delivery === 'dm' ? '请先填写并保存飞书自建应用的 App ID 和 App Secret' : '请先填写并保存有效的飞书机器人 Webhook',
+      );
+    }
     const item = await dispatchFeishuNotification(existing.id, {
       allowRetryFailed: true,
       allowSkipped: true,
@@ -386,11 +528,18 @@ export async function dispatchFeishuOutbox(input: {
     };
   }
 
+  const webhookReady = isFeishuWebhookConfigured();
+  const dmReady = isFeishuAppConfigured();
+  if (!webhookReady && !dmReady) {
+    throw badRequest('请先填写并保存有效的飞书机器人 Webhook 或自建应用凭证');
+  }
+
   const limit = Math.min(Math.max(input.limit ?? 10, 1), 20);
   const statuses = input.includeFailed ? "('pending', 'failed')" : "('pending')";
+  const deliveryClause = `AND ${eligibleDeliveryPredicate(webhookReady, dmReady)}`;
   const rows = all<NotificationRow>(
     `SELECT * FROM notifications
-      WHERE channel = 'feishu' AND status IN ${statuses}
+      WHERE channel = 'feishu' AND status IN ${statuses} ${deliveryClause}
       ORDER BY created_at ASC, rowid ASC
       LIMIT ?`,
     [limit],
@@ -478,6 +627,15 @@ export function listNotifications(limit = 30, channel?: string): NotificationRow
   return all<NotificationRow>('SELECT * FROM notifications ORDER BY created_at DESC, rowid DESC LIMIT ?', [limit]);
 }
 
+function eligibleDeliveryPredicate(webhook: boolean, dm: boolean): string {
+  // Older group cards have no delivery field. Malformed payloads cannot be routed safely.
+  const kind = "CASE WHEN json_valid(payload) THEN COALESCE(json_extract(payload, '$.delivery'), 'webhook') END";
+  if (webhook && dm) return `${kind} IN ('webhook', 'dm')`;
+  if (webhook) return `${kind} = 'webhook'`;
+  if (dm) return `${kind} = 'dm'`;
+  return '0';
+}
+
 export function notificationStats(channel?: string): Record<NotificationStatus, number> {
   const rows = channel
     ? all<{ status: NotificationStatus; n: number }>(
@@ -489,7 +647,13 @@ export function notificationStats(channel?: string): Record<NotificationStatus, 
       );
   const stats: Record<NotificationStatus, number> = { pending: 0, sent: 0, failed: 0, skipped: 0 };
   for (const row of rows) stats[row.status] = row.n;
-  return stats;
+  if (channel !== 'feishu') return stats;
+  const eligible = eligibleDeliveryPredicate(isFeishuWebhookConfigured(), isFeishuAppConfigured());
+  const counts = getRow<{ sendablePending: number; sendableFailed: number }>(`
+    SELECT COUNT(*) FILTER (WHERE status = 'pending') AS sendablePending,
+           COUNT(*) FILTER (WHERE status = 'failed') AS sendableFailed
+    FROM notifications WHERE channel = 'feishu' AND ${eligible}`);
+  return { ...stats, ...counts };
 }
 
 export function notificationPayload(row: NotificationRow): Record<string, unknown> {

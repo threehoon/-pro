@@ -1,4 +1,4 @@
-import type { Application, Interview, Stage } from "../types";
+import type { Application, CalendarSyncStatus, Interview, Stage } from "../types";
 import type { Verdict, WorkflowFields } from "../workflowTypes";
 
 export const boardStages = [
@@ -52,4 +52,25 @@ export function compareRounds(a: Interview, b: Interview) {
 
 export function apiMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
+}
+
+/** 只有 http(s) 链接才可直接渲染为可点击会议入口，避免 javascript: 等协议注入。 */
+export function safeMeetingUrl(url: string | null | undefined): string | null {
+  const raw = url?.trim();
+  if (!raw) return null;
+  try {
+    const parsed = new URL(raw);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed.href : null;
+  } catch {
+    return null;
+  }
+}
+
+export function calendarSyncBadge(
+  status: CalendarSyncStatus | undefined,
+): { label: string; tone: "neutral" | "brand" | "warning" | "danger" } | null {
+  if (!status || status === "none") return null;
+  if (status === "synced") return { label: "已同步飞书日历", tone: "brand" };
+  if (status === "pending") return { label: "日历同步中", tone: "neutral" };
+  return { label: "日历同步失败", tone: "danger" };
 }

@@ -9,9 +9,24 @@ import {
   interviewWithContext,
   listInterviews,
   markNoShow,
+  syncInterviewCalendarNow,
   updateInterview,
 } from '../services/interviews.ts';
 import { queueQuestions } from '../services/recruitment-ai.ts';
+
+function isHttpMeetingUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
+const meetingUrlSchema = z
+  .string()
+  .max(500)
+  .refine((value) => value.trim() === '' || isHttpMeetingUrl(value.trim()), '会议链接必须以 http:// 或 https:// 开头');
 
 const createSchema = z.object({
   applicationId: z.string().min(1, '请选择投递记录'),
@@ -20,7 +35,7 @@ const createSchema = z.object({
   mode: z.enum(['onsite', 'video', 'phone']).optional(),
   durationMinutes: z.number().int().min(15).max(480).optional(),
   location: z.string().max(200).optional(),
-  meetingUrl: z.string().max(500).optional(),
+  meetingUrl: meetingUrlSchema.optional(),
   interviewerId: z.string().nullish(),
   round: z.number().int().min(1).max(2).optional(),
 });
@@ -90,5 +105,11 @@ export async function interviewRoutes(app: FastifyInstance) {
     const user = requireRecruiter(request);
     const { interviewId } = request.params as { interviewId: string };
     return { interview: markNoShow(interviewId, user.id) };
+  });
+
+  app.post('/api/interviews/:interviewId/sync-calendar', async (request) => {
+    const user = requireRecruiter(request);
+    const { interviewId } = request.params as { interviewId: string };
+    return syncInterviewCalendarNow(interviewId, user.id);
   });
 }

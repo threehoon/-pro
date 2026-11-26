@@ -17,10 +17,12 @@ import {
 } from '../constants.ts';
 import { dashboard, candidatePoolSummary, todayTasks } from '../services/dashboard.ts';
 import {
+  createFeishuSharedCalendar,
   feishuStatus,
   resolveFeishuPublicOrigin,
   saveFeishuConfig,
   testFeishuAppConnection,
+  testFeishuCalendarConnection,
   testFeishuWebhook,
 } from '../integrations/feishu.ts';
 import {
@@ -123,6 +125,42 @@ export async function workspaceRoutes(app: FastifyInstance) {
     const user = requireAdmin(request);
     const result = await testFeishuWebhook(user.name);
     auditFeishuIntegration(user.id, 'feishu.test_webhook', { signed: result.signed, latencyMs: result.latencyMs });
+    return result;
+  });
+
+  app.post('/api/settings/feishu/create-calendar', async (request) => {
+    const user = requireAdmin(request);
+    const schema = z
+      .object({
+        summary: z.string().max(120).optional(),
+        description: z.string().max(400).optional(),
+      })
+      .optional();
+    const parsed = schema.safeParse(request.body ?? {});
+    if (!parsed.success) throw badRequest('日历参数格式不正确');
+    const result = await createFeishuSharedCalendar(user.id, parsed.data ?? {});
+    auditFeishuIntegration(user.id, 'feishu.create_calendar', {
+      calendarId: result.calendarId,
+      summary: result.summary,
+      latencyMs: result.latencyMs,
+    });
+    return {
+      ...result,
+      status: {
+        ...result.status,
+        callbackUrl: `${resolveFeishuPublicOrigin(request)}/api/auth/feishu/callback`,
+      },
+    };
+  });
+
+  app.post('/api/settings/feishu/test-calendar', async (request) => {
+    const user = requireAdmin(request);
+    const result = await testFeishuCalendarConnection();
+    auditFeishuIntegration(user.id, 'feishu.test_calendar', {
+      calendarId: result.calendarId,
+      summary: result.summary,
+      latencyMs: result.latencyMs,
+    });
     return result;
   });
 

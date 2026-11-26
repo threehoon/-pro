@@ -97,6 +97,11 @@ function applySchema(conn: DatabaseSync): void {
   ensureColumn(conn, 'interviews', 'summary_model', 'TEXT');
   ensureColumn(conn, 'interviews', 'summarized_at', 'TEXT');
   ensureColumn(conn, 'interviews', 'plan_json', "TEXT NOT NULL DEFAULT '{}'");
+  ensureColumn(conn, 'interviews', 'calendar_sync_status', "TEXT NOT NULL DEFAULT 'none'");
+  ensureColumn(conn, 'interviews', 'calendar_sync_error', 'TEXT');
+  ensureColumn(conn, 'interviews', 'calendar_synced_at', 'TEXT');
+  ensureColumn(conn, 'interviews', 'calendar_attendees_json', "TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn(conn, 'interviews', 'calendar_recreate_required', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn(conn, 'applications', 'composite_json', "TEXT NOT NULL DEFAULT '{}'");
   ensureColumn(conn, 'applications', 'composite_status', "TEXT NOT NULL DEFAULT 'none'");
   ensureColumn(conn, 'applications', 'hired_at', 'TEXT');

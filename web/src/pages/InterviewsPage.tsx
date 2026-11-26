@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../lib/api";
-import { fmtMonthDay, fmtTime, stageColor, weekday } from "../lib/format";
+import { fmtDateTime, fmtMonthDay, fmtTime, stageColor, weekday } from "../lib/format";
 import { Link } from "../lib/router";
 import type { Interview, Meta } from "../types";
 import {
@@ -21,7 +21,7 @@ import {
 import { IconChevronLeft, IconChevronRight, IconClock, IconMapPin, IconLink } from "../components/icons";
 
 import { InterviewDrawer } from "../components/workflow/InterviewDrawer";
-import { candidateLink } from "../lib/workflow";
+import { calendarSyncBadge, candidateLink, safeMeetingUrl } from "../lib/workflow";
 
 const STATUS_LABEL: Record<string, string> = {
   scheduled: "待进行",
@@ -68,8 +68,9 @@ export function InterviewsPage({ meta, canWrite }: { meta: Meta; canWrite: boole
   const [items, setItems] = useState<Interview[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [opened, setOpened] = useState<Interview | null>(null);
+  const [openedId, setOpenedId] = useState<string | null>(null);
   const [rescheduling, setRescheduling] = useState<Interview | null>(null);
+  const [syncingId, setSyncingId] = useState<string | null>(null);
   const toast = useToast();
 
   const from = weekStart.toISOString();
@@ -103,6 +104,8 @@ export function InterviewsPage({ meta, canWrite }: { meta: Meta; canWrite: boole
     });
   }, [weekStart, items, status]);
 
+  // 抽屉始终读取最新列表行，避免同步/取消后仍显示旧状态
+  const opened = useMemo(() => items.find((item) => item.id === openedId) ?? null, [items, openedId]);
   const scheduled = items.filter((item) => item.status === "scheduled");
   const awaiting = items.filter(awaitingSummary);
   const filledDays = days.filter((day) => day.items.length > 0);
@@ -115,6 +118,26 @@ export function InterviewsPage({ meta, canWrite }: { meta: Meta; canWrite: boole
       load();
     } catch (err) {
       toast.push(err instanceof ApiError ? err.message : "操作失败", "error");
+    }
+  }
+
+  async function syncCalendar(interview: Interview) {
+    setSyncingId(interview.id);
+    const previousMeetingUrl = interview.meeting_url?.trim() || null;
+    try {
+      const res = await api.syncInterviewCalendar(interview.id);
+      if (res.sync.ok) {
+        const nextMeetingUrl = res.interview.meeting_url?.trim() || null;
+        const backfilled = Boolean(nextMeetingUrl) && nextMeetingUrl !== previousMeetingUrl;
+        toast.push(backfilled ? "已同步飞书日历并回填会议链接" : "已同步飞书日历", "success");
+      } else {
+        toast.push(res.sync.error || "飞书日历同步失败", "error");
+      }
+      load();
+    } catch (err) {
+      toast.push(err instanceof ApiError ? err.message : "日历同步失败", "error");
+    } finally {
+      setSyncingId(null);
     }
   }
 
@@ -221,23 +244,53 @@ export function InterviewsPage({ meta, canWrite }: { meta: Meta; canWrite: boole
                                 <IconMapPin size={13} /> {item.location}
                               </span>
                             )}
-                            {item.meeting_url && (
-                              <a className="inline-icon" href={item.meeting_url} target="_blank" rel="noreferrer">
-                                <IconLink size={13} /> 会议链接
-                              </a>
-                            )}
+                            {(() => {
+                              const link = item.status === "cancelled" ? null : safeMeetingUrl(item.meeting_url);
+                              return link ? (
+                                <a className="inline-icon" href={link} target="_blank" rel="noreferrer">
+                                  <IconLink size={13} /> 会议链接
+                                </a>
+                              ) : null;
+                            })()}
                             <span className="muted">{item.interviewer_name ? `面试官 ${item.interviewer_name}` : "面试官待定"}</span>
                           </div>
                         </div>
 
                         <div className="agenda-side">
-                          <Badge tone={awaitingSummary(item) ? "warning" : item.status === "completed" ? "brand" : "neutral"}>
-                            {awaitingSummary(item) ? "待总结" : STATUS_LABEL[item.status]}
-                          </Badge>
+                          <div className="agenda-badges">
+                            <Badge tone={awaitingSummary(item) ? "warning" : item.status === "completed" ? "brand" : "neutral"}>
+                              {awaitingSummary(item) ? "待总结" : STATUS_LABEL[item.status]}
+                            </Badge>
+                            {(() => {
+                              const cal = calendarSyncBadge(item.calendar_sync_status);
+                              if (!cal) return null;
+                              const tip =
+                                item.calendar_sync_status === "failed" && item.calendar_sync_error
+                                  ? `失败原因：${item.calendar_sync_error}`
+                                  : item.calendar_synced_at
+                                    ? `同步于 ${fmtDateTime(item.calendar_synced_at)}`
+                                    : undefined;
+                              return (
+                                <span title={tip}>
+                                  <Badge tone={cal.tone}>{cal.label}</Badge>
+                                </span>
+                              );
+                            })()}
+                          </div>
                           <div className="agenda-actions">
-                            <Button size="sm" variant={awaitingSummary(item) ? "primary" : undefined} onClick={() => setOpened(item)}>
+                            <Button size="sm" variant={awaitingSummary(item) ? "primary" : undefined} onClick={() => setOpenedId(item.id)}>
                               {awaitingSummary(item) && canWrite ? "整理面试" : "查看面试"}
                             </Button>
+                            {canWrite && item.calendar_sync_status === "failed" && (
+                              <Button
+                                size="sm"
+                                loading={syncingId === item.id}
+                                disabled={syncingId !== null && syncingId !== item.id}
+                                onClick={() => void syncCalendar(item)}
+                              >
+                                重试同步日历
+                              </Button>
+                            )}
                             {canWrite && item.status === "scheduled" && <>
                               <Button size="sm" onClick={() => setRescheduling(item)}>改期</Button>
                               <Button size="sm" onClick={() => void act(item, "no_show")}>未到场</Button>
@@ -255,7 +308,7 @@ export function InterviewsPage({ meta, canWrite }: { meta: Meta; canWrite: boole
         </div>
       )}
 
-      {opened && <InterviewDrawer key={opened.id} interview={opened} rejectionReasons={meta.rejectionReasons} canWrite={canWrite && opened.status === "scheduled"} onClose={() => { setOpened(null); load(); }} onChange={load} />}
+      {opened && <InterviewDrawer key={opened.id} interview={opened} rejectionReasons={meta.rejectionReasons} canWrite={canWrite && opened.status === "scheduled"} onClose={() => { setOpenedId(null); load(); }} onChange={load} />}
       <RescheduleModal
         interview={rescheduling}
         meta={meta}
@@ -394,8 +447,15 @@ function RescheduleModal({
             {(id) => <Input id={id} value={location} onChange={(event) => setLocation(event.target.value)} />}
           </Field>
         ) : (
-          <Field label="会议链接" span>
-            {(id) => <Input id={id} value={meetingUrl} onChange={(event) => setMeetingUrl(event.target.value)} />}
+          <Field label="会议链接" hint="留空时若已接通飞书日历，将自动生成飞书视频会议链接" span>
+            {(id) => (
+              <Input
+                id={id}
+                value={meetingUrl}
+                placeholder="留空自动生成，或填写飞书/腾讯会议链接"
+                onChange={(event) => setMeetingUrl(event.target.value)}
+              />
+            )}
           </Field>
         )}
       </div>

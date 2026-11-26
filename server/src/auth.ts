@@ -29,6 +29,7 @@ interface UserRow {
   role: Role;
   title: string | null;
   feishu_open_id: string | null;
+  feishu_union_id: string | null;
   created_at: string;
   last_login_at: string | null;
 }
@@ -174,4 +175,141 @@ export function countAdmins(): number {
 export function getUser(userId: string): SessionUser | null {
   const row = getRow<UserRow>('SELECT * FROM users WHERE id = ?', [userId]);
   return row ? publicUser(row) : null;
+}
+
+export interface FeishuIdentity {
+  openId: string;
+  unionId?: string | null;
+  name?: string | null;
+  email?: string | null;
+  enterpriseEmail?: string | null;
+}
+
+export type FeishuLoginMatchResult =
+  | { ok: true; user: SessionUser; matchedBy: 'open_id' | 'union_id' | 'email'; linkedNow: boolean }
+  | { ok: false; code: 'account_not_found' | 'email_bound_other' | 'feishu_conflict' };
+
+export type FeishuBindResult =
+  | { ok: true; user: SessionUser; alreadyBound: boolean }
+  | { ok: false; code: 'user_not_found' | 'already_bound_other' };
+
+function candidateFeishuEmails(identity: FeishuIdentity): string[] {
+  const seen = new Set<string>();
+  for (const raw of [identity.enterpriseEmail, identity.email]) {
+    if (typeof raw !== 'string') continue;
+    const normalized = raw.trim().toLowerCase();
+    if (normalized) seen.add(normalized);
+  }
+  return Array.from(seen);
+}
+
+/**
+ * 飞书扫码登录身份映射（选项 A：不自动建号）：
+ * 依次按 feishu_open_id → feishu_union_id → 企业邮箱/个人邮箱 匹配既有工作台成员。
+ */
+export function resolveFeishuLoginUser(identity: FeishuIdentity): FeishuLoginMatchResult {
+  const openId = identity.openId.trim();
+  const unionId = identity.unionId?.trim() || null;
+  if (!openId) return { ok: false, code: 'account_not_found' };
+
+  return transaction<FeishuLoginMatchResult>(() => {
+    const byOpenId = getRow<UserRow>('SELECT * FROM users WHERE feishu_open_id = ?', [openId]);
+    if (byOpenId) {
+      let nextUnionId = byOpenId.feishu_union_id;
+      if (unionId && !nextUnionId) {
+        const unionOwner = getRow<{ id: string }>('SELECT id FROM users WHERE feishu_union_id = ? AND id != ?', [
+          unionId,
+          byOpenId.id,
+        ]);
+        if (!unionOwner) nextUnionId = unionId;
+      }
+      run('UPDATE users SET feishu_union_id = ?, last_login_at = ? WHERE id = ?', [nextUnionId, now(), byOpenId.id]);
+      const updated = getRow<UserRow>('SELECT * FROM users WHERE id = ?', [byOpenId.id])!;
+      return { ok: true, user: publicUser(updated), matchedBy: 'open_id', linkedNow: false };
+    }
+
+    if (unionId) {
+      const byUnionId = getRow<UserRow>('SELECT * FROM users WHERE feishu_union_id = ?', [unionId]);
+      if (byUnionId) {
+        if (byUnionId.feishu_open_id && byUnionId.feishu_open_id !== openId) {
+          return { ok: false, code: 'feishu_conflict' };
+        }
+        const linkedNow = !byUnionId.feishu_open_id;
+        run('UPDATE users SET feishu_open_id = ?, last_login_at = ? WHERE id = ?', [openId, now(), byUnionId.id]);
+        const updated = getRow<UserRow>('SELECT * FROM users WHERE id = ?', [byUnionId.id])!;
+        return { ok: true, user: publicUser(updated), matchedBy: 'union_id', linkedNow };
+      }
+    }
+
+    for (const candidateEmail of candidateFeishuEmails(identity)) {
+      const byEmail = getRow<UserRow>('SELECT * FROM users WHERE email = ?', [candidateEmail]);
+      if (!byEmail) continue;
+      if (byEmail.feishu_open_id && byEmail.feishu_open_id !== openId) {
+        return { ok: false, code: 'email_bound_other' };
+      }
+      if (byEmail.feishu_union_id && (!unionId || byEmail.feishu_union_id !== unionId)) {
+        return { ok: false, code: 'email_bound_other' };
+      }
+      run('UPDATE users SET feishu_open_id = ?, feishu_union_id = COALESCE(?, feishu_union_id), last_login_at = ? WHERE id = ?', [
+        openId,
+        unionId,
+        now(),
+        byEmail.id,
+      ]);
+      const updated = getRow<UserRow>('SELECT * FROM users WHERE id = ?', [byEmail.id])!;
+      return { ok: true, user: publicUser(updated), matchedBy: 'email', linkedNow: true };
+    }
+
+    return { ok: false, code: 'account_not_found' };
+  });
+}
+
+/** 将飞书身份绑定到已登录的工作台账号，校验同一飞书身份不能重复绑给其他成员 */
+export function bindFeishuToUser(userId: string, identity: FeishuIdentity): FeishuBindResult {
+  const openId = identity.openId.trim();
+  const unionId = identity.unionId?.trim() || null;
+  if (!openId) return { ok: false, code: 'user_not_found' };
+
+  return transaction<FeishuBindResult>(() => {
+    const target = getRow<UserRow>('SELECT * FROM users WHERE id = ?', [userId]);
+    if (!target) return { ok: false, code: 'user_not_found' };
+
+    const openOwner = getRow<{ id: string }>('SELECT id FROM users WHERE feishu_open_id = ? AND id != ?', [
+      openId,
+      userId,
+    ]);
+    if (openOwner) return { ok: false, code: 'already_bound_other' };
+
+    if (unionId) {
+      const unionOwner = getRow<{ id: string }>('SELECT id FROM users WHERE feishu_union_id = ? AND id != ?', [
+        unionId,
+        userId,
+      ]);
+      if (unionOwner) return { ok: false, code: 'already_bound_other' };
+    }
+
+    const nextUnionId = target.feishu_open_id === openId ? (unionId ?? target.feishu_union_id ?? null) : unionId;
+    const alreadyBound = target.feishu_open_id === openId && target.feishu_union_id === nextUnionId;
+    if (!alreadyBound) {
+      run('UPDATE users SET feishu_open_id = ?, feishu_union_id = ? WHERE id = ?', [
+        openId,
+        nextUnionId,
+        userId,
+      ]);
+    }
+    const updated = getRow<UserRow>('SELECT * FROM users WHERE id = ?', [userId])!;
+    return { ok: true, user: publicUser(updated), alreadyBound };
+  });
+}
+
+/** 解除指定工作台账号的飞书绑定 */
+export function unbindFeishuFromUser(userId: string): { user: SessionUser; unbound: boolean } {
+  const target = getRow<UserRow>('SELECT * FROM users WHERE id = ?', [userId]);
+  if (!target) throw notFound('成员不存在');
+  if (!target.feishu_open_id && !target.feishu_union_id) {
+    return { user: publicUser(target), unbound: false };
+  }
+  run('UPDATE users SET feishu_open_id = NULL, feishu_union_id = NULL WHERE id = ?', [userId]);
+  const updated = getRow<UserRow>('SELECT * FROM users WHERE id = ?', [userId])!;
+  return { user: publicUser(updated), unbound: true };
 }

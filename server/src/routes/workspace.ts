@@ -16,8 +16,20 @@ import {
   RESUME_ACCEPT,
 } from '../constants.ts';
 import { dashboard, candidatePoolSummary, todayTasks } from '../services/dashboard.ts';
-import { feishuStatus, saveFeishuConfig } from '../integrations/feishu.ts';
-import { listNotifications, notificationStats } from '../services/notifications.ts';
+import {
+  feishuStatus,
+  resolveFeishuPublicOrigin,
+  saveFeishuConfig,
+  testFeishuAppConnection,
+  testFeishuWebhook,
+} from '../integrations/feishu.ts';
+import {
+  dispatchFeishuOutbox,
+  listNotifications,
+  notificationStats,
+  skipPendingFeishuNotifications,
+} from '../services/notifications.ts';
+import { audit } from '../services/audit.ts';
 
 export async function workspaceRoutes(app: FastifyInstance) {
   app.get('/api/meta', async () => ({
@@ -62,14 +74,21 @@ export async function workspaceRoutes(app: FastifyInstance) {
     const { channel, limit } = parsed.data;
     return {
       items: listNotifications(limit ?? 30, channel),
-      stats: notificationStats(),
+      stats: notificationStats(channel),
     };
   });
 
   app.get('/api/settings/feishu', async (request) => {
     requireUser(request);
-    return feishuStatus();
+    return {
+      ...feishuStatus(),
+      callbackUrl: `${resolveFeishuPublicOrigin(request)}/api/auth/feishu/callback`,
+    };
   });
+
+  function auditFeishuIntegration(actorId: string, action: string, detail: Record<string, unknown>) {
+    audit({ actorId, action, entityType: 'integration', entityId: 'feishu', detail });
+  }
 
   // 飞书配置包含凭证，只有管理员能改
   app.put('/api/settings/feishu', async (request) => {
@@ -80,10 +99,77 @@ export async function workspaceRoutes(app: FastifyInstance) {
       verification_token: z.string().optional(),
       encrypt_key: z.string().optional(),
       bot_webhook: z.string().optional(),
+      bot_secret: z.string().optional(),
       calendar_id: z.string().optional(),
     });
     const parsed = schema.safeParse(request.body);
     if (!parsed.success) throw badRequest('飞书配置格式不正确');
-    return saveFeishuConfig(parsed.data, user.id);
+    const next = saveFeishuConfig(parsed.data, user.id);
+    auditFeishuIntegration(user.id, 'feishu.config.update', { updatedFields: Object.keys(parsed.data) });
+    return {
+      ...next,
+      callbackUrl: `${resolveFeishuPublicOrigin(request)}/api/auth/feishu/callback`,
+    };
+  });
+
+  app.post('/api/settings/feishu/test-app', async (request) => {
+    const user = requireAdmin(request);
+    const result = await testFeishuAppConnection();
+    auditFeishuIntegration(user.id, 'feishu.test_app', { endpoint: result.endpoint, latencyMs: result.latencyMs });
+    return result;
+  });
+
+  app.post('/api/settings/feishu/test-webhook', async (request) => {
+    const user = requireAdmin(request);
+    const result = await testFeishuWebhook(user.name);
+    auditFeishuIntegration(user.id, 'feishu.test_webhook', { signed: result.signed, latencyMs: result.latencyMs });
+    return result;
+  });
+
+  app.post('/api/notifications/feishu/dispatch', async (request) => {
+    const user = requireAdmin(request);
+    const schema = z
+      .object({
+        notificationId: z.string().min(1).optional(),
+        limit: z.coerce.number().int().min(1).max(20).optional(),
+        includeFailed: z.boolean().optional(),
+      })
+      .optional();
+    const parsed = schema.safeParse(request.body ?? {});
+    if (!parsed.success) throw badRequest('补发参数不合法', parsed.error.flatten());
+    const result = await dispatchFeishuOutbox(parsed.data ?? {});
+    audit({
+      actorId: user.id,
+      action: 'feishu.notifications.dispatch',
+      entityType: 'notification',
+      entityId: parsed.data?.notificationId ?? 'batch',
+      detail: {
+        attempted: result.attempted,
+        sent: result.sent,
+        failed: result.failed,
+        skipped: result.skipped,
+      },
+    });
+    return result;
+  });
+
+  app.post('/api/notifications/feishu/skip-pending', async (request) => {
+    const user = requireAdmin(request);
+    const schema = z
+      .object({
+        notificationId: z.string().min(1).optional(),
+      })
+      .optional();
+    const parsed = schema.safeParse(request.body ?? {});
+    if (!parsed.success) throw badRequest('参数不合法', parsed.error.flatten());
+    const result = skipPendingFeishuNotifications(parsed.data ?? {});
+    audit({
+      actorId: user.id,
+      action: 'feishu.notifications.skip',
+      entityType: 'notification',
+      entityId: parsed.data?.notificationId ?? 'pending_all',
+      detail: { skipped: result.skipped },
+    });
+    return result;
   });
 }

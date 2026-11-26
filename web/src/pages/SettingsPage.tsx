@@ -13,6 +13,7 @@ import {
   ListSkeleton,
   PageHeader,
   Select,
+  useConfirm,
   useToast,
 } from "../components/ui";
 import { IconArrowUpRight, IconCheck } from "../components/icons";
@@ -26,15 +27,36 @@ const NOTIFY_STATUS: Record<string, { label: string; tone: "neutral" | "brand" |
   skipped: { label: "已跳过", tone: "neutral" },
 };
 
-export function SettingsPage({ user, meta, onLogout }: { user: SessionUser; meta: Meta; onLogout: () => void }) {
+export function SettingsPage({
+  user,
+  meta,
+  onUserUpdated,
+  onFeishuConfigChanged,
+  onLogout,
+}: {
+  user: SessionUser;
+  meta: Meta;
+  onUserUpdated?: (user: SessionUser) => void;
+  onFeishuConfigChanged?: (enabled: boolean) => void;
+  onLogout: () => void;
+}) {
   const [team, setTeam] = useState<SessionUser[] | null>(null);
   const [teamError, setTeamError] = useState("");
+  const [unbindingId, setUnbindingId] = useState<string | null>(null);
+  const [copiedCallback, setCopiedCallback] = useState(false);
   const [feishu, setFeishu] = useState<FeishuStatus | null>(null);
   const [feishuError, setFeishuError] = useState("");
   const [notifications, setNotifications] = useState<NotificationItem[] | null>(null);
+  const [notifyStats, setNotifyStats] = useState<Record<string, number> | null>(null);
   const [showAllNotifications, setShowAllNotifications] = useState(false);
+  const [outboxBusy, setOutboxBusy] = useState<"dispatch" | "skip" | null>(null);
+  const [sendingId, setSendingId] = useState<string | null>(null);
+  const [outboxNotice, setOutboxNotice] = useState("");
+  const [outboxError, setOutboxError] = useState("");
   const toast = useToast();
+  const confirm = useConfirm();
   const isAdmin = user.role === "admin";
+  const feishuCallbackUrl = feishu?.callbackUrl || `${window.location.origin}/api/auth/feishu/callback`;
 
   const loadTeam = useCallback(() => {
     setTeamError("");
@@ -56,8 +78,14 @@ export function SettingsPage({ user, meta, onLogout }: { user: SessionUser; meta
     api
       // 出站箱只看出站消息，不受站内提醒条数挤占
       .notifications({ channel: "feishu", limit: 50 })
-      .then((data) => setNotifications(data.items))
-      .catch(() => setNotifications([]));
+      .then((data) => {
+        setNotifications(data.items);
+        setNotifyStats(data.stats);
+      })
+      .catch(() => {
+        setNotifications([]);
+        setNotifyStats(null);
+      });
   }, []);
 
   useEffect(() => {
@@ -76,6 +104,129 @@ export function SettingsPage({ user, meta, onLogout }: { user: SessionUser; meta
     }
   }
 
+  async function unbindFeishu(member: SessionUser) {
+    const isSelf = member.id === user.id;
+    const ok = await confirm({
+      title: isSelf ? "解绑当前账号的飞书？" : `解绑 ${member.name} 的飞书账号？`,
+      description: isSelf
+        ? "解绑后将无法用飞书扫码直接登录当前账号，可随时再次绑定或使用账号密码登录。"
+        : "解绑后该成员无法再通过原飞书账号扫码登录，需重新绑定。",
+      confirmLabel: "确认解绑",
+      tone: "danger",
+    });
+    if (!ok) return;
+    setUnbindingId(member.id);
+    try {
+      const data = await api.unbindFeishu(isSelf ? undefined : member.id);
+      setTeam(data.items);
+      if (isSelf) onUserUpdated?.(data.user);
+      toast.push(isSelf ? "已解绑飞书账号" : `已解绑 ${member.name} 的飞书账号`, "success");
+    } catch (err) {
+      toast.push(err instanceof ApiError ? err.message : "解绑失败", "error");
+    } finally {
+      setUnbindingId(null);
+    }
+  }
+
+  async function copyCallbackUrl() {
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(feishuCallbackUrl);
+      } else {
+        throw new Error("clipboard unavailable");
+      }
+      setCopiedCallback(true);
+      toast.push("回调地址已复制", "success");
+      window.setTimeout(() => setCopiedCallback(false), 2000);
+    } catch {
+      toast.push("请手动选中上方回调地址复制", "error");
+    }
+  }
+
+  function refreshOutbox() {
+    loadNotifications();
+    loadFeishu();
+  }
+
+  async function runOutboxAction(
+    setBusy: (active: boolean) => void,
+    fallbackError: string,
+    action: () => Promise<{ message: string; isError?: boolean }>,
+  ) {
+    setBusy(true);
+    setOutboxError("");
+    setOutboxNotice("");
+    try {
+      const outcome = await action();
+      if (outcome.isError) {
+        setOutboxError(outcome.message);
+        toast.push(outcome.message, "error");
+      } else {
+        setOutboxNotice(outcome.message);
+        toast.push(outcome.message, "success");
+      }
+      loadNotifications();
+      loadFeishu();
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : fallbackError;
+      setOutboxError(message);
+      toast.push(message, "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function dispatchBatch(includeFailed: boolean) {
+    await runOutboxAction(
+      (active) => setOutboxBusy(active ? "dispatch" : null),
+      "批量补发失败",
+      async () => {
+        const result = await api.dispatchFeishuNotifications({ limit: 10, includeFailed });
+        const message =
+          result.attempted === 0
+            ? "当前没有需要补发的消息"
+            : `本次尝试 ${result.attempted} 条：成功 ${result.sent} 条${result.failed > 0 ? `，失败 ${result.failed} 条` : ""}${result.remainingPending > 0 ? `（仍有 ${result.remainingPending} 条待发）` : ""}`;
+        return { message, isError: result.failed > 0 };
+      },
+    );
+  }
+
+  async function dispatchSingle(item: NotificationItem) {
+    await runOutboxAction(
+      (active) => setSendingId(active ? item.id : null),
+      "发送失败",
+      async () => {
+        const result = await api.dispatchFeishuNotifications({ notificationId: item.id });
+        const first = result.items[0];
+        if (first?.ok) return { message: `已发送「${item.title}」` };
+        return { message: first?.error || "飞书推送失败", isError: true };
+      },
+    );
+  }
+
+  async function skipAllPending() {
+    const pendingCount = notifyStats?.pending ?? feishu?.pendingNotifications ?? 0;
+    const ok = await confirm({
+      title: `跳过当前 ${pendingCount} 条历史待发消息？`,
+      description: "这些历史记录会标记为「已跳过」并保留在列表中，避免首次接通机器人时把旧测试消息刷屏到飞书群；后续仍可按条手动重发。",
+      confirmLabel: "跳过历史待发",
+    });
+    if (!ok) return;
+    await runOutboxAction(
+      (active) => setOutboxBusy(active ? "skip" : null),
+      "操作失败",
+      async () => {
+        const result = await api.skipPendingFeishuNotifications();
+        return { message: `已跳过 ${result.skipped} 条历史待发消息` };
+      },
+    );
+  }
+
+  const pendingCount = notifyStats?.pending ?? feishu?.pendingNotifications ?? 0;
+  const failedCount = notifyStats?.failed ?? feishu?.failedNotifications ?? 0;
+  const sentCount = notifyStats?.sent ?? feishu?.sentNotifications ?? 0;
+  const skippedCount = notifyStats?.skipped ?? 0;
+
   return (
     <div className="page page-narrow">
       <PageHeader title="设置" description="管理 AI 模型、飞书接入、团队权限与账号安全。" />
@@ -86,7 +237,9 @@ export function SettingsPage({ user, meta, onLogout }: { user: SessionUser; meta
         <header className="card-head">
           <div>
             <h2>飞书接入</h2>
-            <p className="card-sub">先填好凭据，平台功能不受影响；消息会先留在出站箱，接通后统一补发。</p>
+            <p className="card-sub">
+              支持群机器人卡片推送与飞书扫码登录；配置 App ID / App Secret 并在飞书后台登记回调地址后即可扫码登录。
+            </p>
           </div>
           {feishu && (
             <Badge tone={feishu.configured ? "brand" : "neutral"} dot>
@@ -118,17 +271,42 @@ export function SettingsPage({ user, meta, onLogout }: { user: SessionUser; meta
               <div>
                 <span className="muted">能力就绪度</span>
                 <div className="chip-row">
-                  <Badge tone={feishu.ready.login ? "brand" : "neutral"}>{feishu.ready.login ? "登录已就绪" : "登录待接入"}</Badge>
                   <Badge tone={feishu.ready.notifications ? "brand" : "neutral"}>
-                    {feishu.ready.notifications ? "通知已就绪" : "通知待接入"}
+                    {feishu.ready.notifications ? "机器人推送已就绪" : "机器人推送待接入"}
                   </Badge>
-                  <Badge tone={feishu.ready.calendar ? "brand" : "neutral"}>{feishu.ready.calendar ? "日历已就绪" : "日历待接入"}</Badge>
+                  <Badge tone={feishu.ready.login ? "brand" : "neutral"}>
+                    {feishu.ready.login ? "扫码登录已就绪" : "扫码登录待接入"}
+                  </Badge>
+                  <Badge tone={feishu.ready.calendar ? "brand" : "neutral"}>
+                    {feishu.ready.calendar ? "日历已就绪" : "日历待接入"}
+                  </Badge>
                 </div>
               </div>
-              <div>
-                <span className="muted">待发送消息</span>
-                <strong className="big-number">{feishu.pendingNotifications}</strong>
+              <div className="feishu-counters">
+                <div>
+                  <span className="muted">待发送</span>
+                  <strong className="big-number">{pendingCount}</strong>
+                </div>
+                {failedCount > 0 && (
+                  <div>
+                    <span className="muted">失败</span>
+                    <strong className="big-number feishu-count-danger">{failedCount}</strong>
+                  </div>
+                )}
               </div>
+            </div>
+
+            <div className="feishu-callback-box">
+              <div className="feishu-callback-info">
+                <span className="feishu-callback-label">飞书登录回调地址（Redirect URL）</span>
+                <code className="feishu-callback-url">{feishuCallbackUrl}</code>
+                <span className="muted">
+                  复制到飞书开放平台「安全设置 → 重定向 URL」即可启用扫码登录与账号绑定。
+                </span>
+              </div>
+              <Button size="sm" type="button" onClick={() => void copyCallbackUrl()}>
+                {copiedCallback ? "已复制" : "复制回调地址"}
+              </Button>
             </div>
 
             {isAdmin ? (
@@ -136,14 +314,17 @@ export function SettingsPage({ user, meta, onLogout }: { user: SessionUser; meta
                 status={feishu}
                 onSaved={(next) => {
                   setFeishu(next);
+                  onFeishuConfigChanged?.(next.ready.login);
                   toast.push("飞书配置已保存", "success");
                 }}
               />
             ) : (
-              <p className="muted">只有管理员可以修改飞书凭据；当前已保存 {Object.values(feishu.fields).filter(Boolean).length} 项。</p>
+              <p className="muted">
+                只有管理员可以修改飞书凭据或触发测试；当前已保存 {Object.values(feishu.fields).filter(Boolean).length} 项。
+              </p>
             )}
             <p className="muted feishu-note">
-              目前只保存配置、不真正外发。接入飞书登录、机器人消息和日历同步时，出站箱里的消息会按原顺序补发。
+              Webhook 仅接受飞书官方 HTTPS 域名，App Secret 与签名密钥仅在服务端保存、不回传前端。
               <a href="https://open.feishu.cn/document" target="_blank" rel="noreferrer">
                 飞书开放平台文档 <IconArrowUpRight size={12} />
               </a>
@@ -156,20 +337,68 @@ export function SettingsPage({ user, meta, onLogout }: { user: SessionUser; meta
         <header className="card-head">
           <div>
             <h2>飞书出站箱</h2>
-            <p className="card-sub">阶段流转与面试安排都会写一条待发消息；接上机器人后按原顺序补发。工作台内的提醒已实时显示在右上角铃铛。</p>
+            <p className="card-sub">
+              阶段流转与面试安排在配置机器人 Webhook 后自动异步推送；未配置或推送失败时留在这里，不影响招聘操作。
+            </p>
           </div>
-          <Button size="sm" onClick={loadNotifications}>
-            刷新
-          </Button>
+          <div className="notify-head-actions">
+            {isAdmin && (pendingCount > 0 || failedCount > 0) && (
+              <Button
+                size="sm"
+                variant="primary"
+                loading={outboxBusy === "dispatch"}
+                disabled={!feishu?.ready.notifications || outboxBusy !== null || sendingId !== null}
+                onClick={() => void dispatchBatch(pendingCount === 0)}
+              >
+                {pendingCount > 0 ? "补发待发（最多 10 条）" : "重试失败（最多 10 条）"}
+              </Button>
+            )}
+            {isAdmin && pendingCount > 0 && (
+              <Button
+                size="sm"
+                loading={outboxBusy === "skip"}
+                disabled={outboxBusy !== null || sendingId !== null}
+                onClick={() => void skipAllPending()}
+              >
+                跳过历史待发
+              </Button>
+            )}
+            <Button size="sm" onClick={refreshOutbox} disabled={outboxBusy !== null}>
+              刷新
+            </Button>
+          </div>
         </header>
+
+        {notifyStats && (pendingCount > 0 || sentCount > 0 || failedCount > 0 || skippedCount > 0) && (
+          <div className="notify-stats muted">
+            <span>待发 {pendingCount}</span>
+            <span>已发 {sentCount}</span>
+            <span>失败 {failedCount}</span>
+            <span>已跳过 {skippedCount}</span>
+          </div>
+        )}
+
+        {outboxError && (
+          <p className="form-error notify-banner" role="alert">
+            {outboxError}
+          </p>
+        )}
+        {outboxNotice && (
+          <p className="notify-notice" role="status">
+            {outboxNotice}
+          </p>
+        )}
+
         {!notifications && <ListSkeleton rows={3} />}
         {notifications && notifications.length === 0 && (
-          <EmptyState title="还没有待发消息" description="推进候选人阶段后，这里会出现待飞书发送的消息。" />
+          <EmptyState title="还没有飞书出站记录" description="推进候选人阶段或安排面试后，这里会出现对应的飞书卡片推送记录。" />
         )}
         {notifications && notifications.length > 0 && (
           <ul className="notify-list">
             {(showAllNotifications ? notifications : notifications.slice(0, 5)).map((item) => {
               const status = NOTIFY_STATUS[item.status] ?? { label: item.status, tone: "neutral" as const };
+              const canSend = isAdmin && item.status !== "sent";
+              const actionLabel = item.status === "failed" ? "重试" : item.status === "skipped" ? "重发" : "发送";
               return (
                 <li key={item.id}>
                   <div>
@@ -178,10 +407,28 @@ export function SettingsPage({ user, meta, onLogout }: { user: SessionUser; meta
                       {item.body ? `${item.body} · ` : ""}
                       {timeAgo(item.created_at)}
                     </span>
+                    {item.last_error && (
+                      <span className={item.status === "failed" ? "notify-error" : "notify-skip-note"}>
+                        {item.status === "failed" ? `失败原因：${item.last_error}` : item.last_error}
+                      </span>
+                    )}
                   </div>
                   <div className="notify-meta">
                     <Badge tone={status.tone}>{status.label}</Badge>
+                    {item.status === "failed" && item.attempts > 0 && (
+                      <span className="muted">第 {item.attempts} 次</span>
+                    )}
                     {item.sent_at && <span className="muted">{fmtDateTime(item.sent_at)}</span>}
+                    {canSend && (
+                      <Button
+                        size="sm"
+                        loading={sendingId === item.id}
+                        disabled={!feishu?.ready.notifications || outboxBusy !== null || (sendingId !== null && sendingId !== item.id)}
+                        onClick={() => void dispatchSingle(item)}
+                      >
+                        {actionLabel}
+                      </Button>
+                    )}
                   </div>
                 </li>
               );
@@ -194,7 +441,7 @@ export function SettingsPage({ user, meta, onLogout }: { user: SessionUser; meta
               {showAllNotifications ? "只看最近 5 条" : `展开全部 ${notifications.length} 条`}
             </Button>
             <span className="muted">
-              共 {notifications.length} 条待发消息，接入后按原顺序补发并保留完整记录。
+              当前列出最近 {notifications.length} 条记录，按时间倒序展示。
             </span>
           </div>
         )}
@@ -220,35 +467,66 @@ export function SettingsPage({ user, meta, onLogout }: { user: SessionUser; meta
         {!team && !teamError && <ListSkeleton rows={3} />}
         {team && (
           <ul className="team-list">
-            {team.map((member) => (
-              <li key={member.id}>
-                <div className="team-person">
-                  <strong>
-                    {member.name}
-                    {member.id === user.id && <span className="you">你</span>}
-                  </strong>
-                  <span className="muted">
-                    {member.username ? `账号 ${member.username} · ${member.email}` : member.email}
-                  </span>
-                </div>
-                {isAdmin ? (
-                  <Select
-                    value={member.role}
-                    aria-label={`${member.name} 的角色`}
-                    onChange={(event) => void changeRole(member, event.target.value)}
-                    className="role-select"
-                  >
-                    {Object.entries(meta.roleLabels).map(([value, label]) => (
-                      <option key={value} value={value}>
-                        {label}
-                      </option>
-                    ))}
-                  </Select>
-                ) : (
-                  <Badge>{meta.roleLabels[member.role] ?? member.role}</Badge>
-                )}
-              </li>
-            ))}
+            {team.map((member) => {
+              const isSelf = member.id === user.id;
+              const isBound = Boolean(member.feishu_open_id);
+              const canUnbind = isBound && (isSelf || isAdmin);
+              return (
+                <li key={member.id}>
+                  <div className="team-person">
+                    <strong>
+                      {member.name}
+                      {isSelf && <span className="you">你</span>}
+                    </strong>
+                    <span className="muted">
+                      {member.username ? `账号 ${member.username} · ${member.email}` : member.email}
+                    </span>
+                  </div>
+                  <div className="team-controls">
+                    <Badge tone={isBound ? "brand" : "neutral"} dot>
+                      {isBound ? "已绑飞书" : "未绑飞书"}
+                    </Badge>
+                    {isSelf && !isBound &&
+                      (feishu?.ready.login ? (
+                        <a className="btn btn-sm btn-secondary" href="/api/auth/feishu/start?mode=bind">
+                          绑定飞书
+                        </a>
+                      ) : (
+                        <Button size="sm" type="button" disabled title="请先由管理员配置飞书 App ID 与 App Secret">
+                          绑定飞书
+                        </Button>
+                      ))}
+                    {canUnbind && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        loading={unbindingId === member.id}
+                        disabled={unbindingId !== null && unbindingId !== member.id}
+                        onClick={() => void unbindFeishu(member)}
+                      >
+                        解绑飞书
+                      </Button>
+                    )}
+                    {isAdmin ? (
+                      <Select
+                        value={member.role}
+                        aria-label={`${member.name} 的角色`}
+                        onChange={(event) => void changeRole(member, event.target.value)}
+                        className="role-select"
+                      >
+                        {Object.entries(meta.roleLabels).map(([value, label]) => (
+                          <option key={value} value={value}>
+                            {label}
+                          </option>
+                        ))}
+                      </Select>
+                    ) : (
+                      <Badge>{meta.roleLabels[member.role] ?? member.role}</Badge>
+                    )}
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         )}
         {!isAdmin && <p className="muted">只有管理员可以添加成员或修改角色。</p>}
@@ -352,74 +630,213 @@ function FeishuForm({ status, onSaved }: { status: FeishuStatus; onSaved: (next:
   const [form, setForm] = useState({
     app_id: "",
     app_secret: "",
-    verification_token: "",
     bot_webhook: "",
+    bot_secret: "",
+    verification_token: "",
     calendar_id: "",
   });
-  const [busy, setBusy] = useState(false);
+  const [clearedKeys, setClearedKeys] = useState<Set<keyof typeof form>>(() => new Set());
+  const [busy, setBusy] = useState<"save" | "test-app" | "test-webhook" | null>(null);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const toast = useToast();
+
+  function toggleClear(key: keyof typeof form) {
+    setClearedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+    setForm((prev) => ({ ...prev, [key]: "" }));
+  }
 
   async function submit() {
     const patch: Record<string, string> = {};
-    for (const [key, value] of Object.entries(form)) {
-      if (value.trim()) patch[key] = value.trim();
+    for (const [key, value] of Object.entries(form) as Array<[keyof typeof form, string]>) {
+      if (clearedKeys.has(key)) {
+        patch[key] = "";
+      } else if (value.trim()) {
+        patch[key] = value.trim();
+      }
     }
     if (Object.keys(patch).length === 0) {
-      setError("至少填写一项后再保存");
+      setError("请填写要修改的配置项，或选择要清空的已保存项");
       return;
     }
-    setBusy(true);
+    setBusy("save");
     setError("");
+    setNotice("");
     try {
       const next = await api.saveFeishu(patch);
       onSaved(next);
-      setForm({ app_id: "", app_secret: "", verification_token: "", bot_webhook: "", calendar_id: "" });
+      setForm({
+        app_id: "",
+        app_secret: "",
+        bot_webhook: "",
+        bot_secret: "",
+        verification_token: "",
+        calendar_id: "",
+      });
+      setClearedKeys(new Set());
+      setNotice("飞书配置已保存，可直接点击下方按钮测试连通性。");
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "保存失败");
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   }
 
-  const items: Array<{ key: keyof typeof form; label: string; placeholder: string; filled: boolean; secret?: boolean }> = [
+  async function runTest(kind: "test-app" | "test-webhook") {
+    setBusy(kind);
+    setError("");
+    setNotice("");
+    try {
+      if (kind === "test-app") {
+        const res = await api.testFeishuApp();
+        const msg = `自建应用凭证连通成功 · ${res.latencyMs} 毫秒（${res.endpoint}，令牌有效约 ${Math.round(res.expiresIn / 60)} 分钟）`;
+        setNotice(msg);
+        toast.push("飞书自建应用凭证校验通过", "success");
+      } else {
+        const res = await api.testFeishuWebhook();
+        const msg = `测试卡片已发送到飞书群 · ${res.latencyMs} 毫秒${res.signed ? "（已启用签名校验）" : ""}`;
+        setNotice(msg);
+        toast.push("测试卡片已发送到飞书群", "success");
+      }
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : "连通测试失败";
+      setError(message);
+      toast.push(message, "error");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const items: Array<{
+    key: keyof typeof form;
+    label: string;
+    placeholder: string;
+    filled: boolean;
+    secret?: boolean;
+    span?: boolean;
+    hint?: string;
+  }> = [
     { key: "app_id", label: "App ID", placeholder: "cli_xxxxxxxx", filled: status.fields.app_id },
     { key: "app_secret", label: "App Secret", placeholder: "留空表示不修改", filled: status.fields.app_secret, secret: true },
-    { key: "verification_token", label: "Verification Token", placeholder: "事件订阅校验用", filled: status.fields.verification_token },
-    { key: "bot_webhook", label: "机器人 Webhook", placeholder: "https://open.feishu.cn/open-apis/bot/v2/hook/...", filled: status.fields.bot_webhook },
-    { key: "calendar_id", label: "日历 ID", placeholder: "面试日程同步用，可留空", filled: status.fields.calendar_id },
+    {
+      key: "bot_webhook",
+      label: "机器人 Webhook",
+      placeholder: "https://open.feishu.cn/open-apis/bot/v2/hook/...",
+      filled: status.fields.bot_webhook,
+      span: true,
+    },
+    {
+      key: "bot_secret",
+      label: "机器人签名密钥（可选）",
+      placeholder: "未开启签名校验可留空",
+      filled: status.fields.bot_secret,
+      secret: true,
+      hint: status.fields.bot_secret ? "已保存签名密钥，留空保持不变" : "仅当群机器人开启「签名校验」时填写",
+    },
+    {
+      key: "verification_token",
+      label: "Verification Token",
+      placeholder: "事件订阅校验用（后续阶段）",
+      filled: status.fields.verification_token,
+    },
+    {
+      key: "calendar_id",
+      label: "日历 ID",
+      placeholder: "面试日程同步用（阶段三），可留空",
+      filled: status.fields.calendar_id,
+      span: true,
+    },
   ];
 
   return (
     <div className="feishu-form">
       <div className="form-grid">
-        {items.map((item) => (
-          <Field
-            key={item.key}
-            label={item.label}
-            hint={item.filled ? "已保存，可填写新值覆盖" : undefined}
-            span={item.key === "bot_webhook"}
-          >
-            {(id) => (
-              <Input
-                id={id}
-                type={item.secret ? "password" : "text"}
-                value={form[item.key]}
-                placeholder={item.placeholder}
-                autoComplete="off"
-                onChange={(event) => setForm({ ...form, [item.key]: event.target.value })}
-              />
-            )}
-          </Field>
-        ))}
+        {items.map((item) => {
+          const markedClear = clearedKeys.has(item.key);
+          return (
+            <Field
+              key={item.key}
+              label={item.label}
+              hint={
+                markedClear
+                  ? "保存后将清空此项"
+                  : item.hint ?? (item.filled ? "已保存，可填写新值覆盖" : undefined)
+              }
+              span={item.span}
+            >
+              {(id) => (
+                <div className="feishu-input-row">
+                  <Input
+                    id={id}
+                    type={item.secret ? "password" : "text"}
+                    value={form[item.key]}
+                    placeholder={markedClear ? "保存后将清空此项" : item.placeholder}
+                    disabled={markedClear || busy !== null}
+                    autoComplete="off"
+                    onChange={(event) => {
+                      const val = event.target.value;
+                      setForm((prev) => ({ ...prev, [item.key]: val }));
+                      if (clearedKeys.has(item.key)) {
+                        setClearedKeys((prev) => {
+                          const next = new Set(prev);
+                          next.delete(item.key);
+                          return next;
+                        });
+                      }
+                    }}
+                  />
+                  {item.filled && (
+                    <button
+                      type="button"
+                      className={`feishu-clear-btn ${markedClear ? "active" : ""}`}
+                      aria-label={`${markedClear ? "撤销清空" : "清空"}${item.label}`}
+                      aria-pressed={markedClear}
+                      disabled={busy !== null}
+                      onClick={() => toggleClear(item.key)}
+                    >
+                      {markedClear ? "撤销" : "清空"}
+                    </button>
+                  )}
+                </div>
+              )}
+            </Field>
+          );
+        })}
       </div>
       {error && (
         <p className="form-error" role="alert">
           {error}
         </p>
       )}
-      <div className="form-actions">
-        <Button variant="primary" loading={busy} onClick={() => void submit()}>
+      {notice && (
+        <p className="notify-notice" role="status">
+          {notice}
+        </p>
+      )}
+      <div className="form-actions feishu-actions">
+        <Button variant="primary" loading={busy === "save"} disabled={busy !== null} onClick={() => void submit()}>
           保存飞书配置
+        </Button>
+        <Button
+          type="button"
+          loading={busy === "test-app"}
+          disabled={!status.ready.login || busy !== null}
+          onClick={() => void runTest("test-app")}
+        >
+          测试应用连接
+        </Button>
+        <Button
+          type="button"
+          loading={busy === "test-webhook"}
+          disabled={!status.ready.notifications || busy !== null}
+          onClick={() => void runTest("test-webhook")}
+        >
+          发送测试消息
         </Button>
         <span className="muted">{status.updatedAt ? `上次更新 ${fmtDateTime(status.updatedAt)}` : "尚未保存过配置"}</span>
       </div>

@@ -21,13 +21,54 @@ export function App() {
   );
 }
 
+const FEISHU_OAUTH_ERRORS: Record<string, string> = {
+  not_configured: "管理员尚未完成飞书自建应用配置，暂不可使用飞书登录。",
+  bind_auth_required: "请先登录工作台账号，再到设置页绑定飞书。",
+  cancelled: "已取消飞书授权，可重新扫码或使用账号密码登录。",
+  invalid_state: "飞书登录状态已失效或重复提交，请重新发起。",
+  missing_code: "飞书未返回授权码，请重试。",
+  oauth_failed: "飞书身份校验失败，请检查飞书后台的重定向 URL 与应用凭证后重试。",
+  account_not_found: "未找到对应的工作台账号，请联系管理员先在设置页添加成员后再使用飞书登录。",
+  email_bound_other: "该邮箱对应的工作台账号已绑定其他飞书身份，请联系管理员核对。",
+  feishu_conflict: "该飞书账号的身份信息存在冲突，请联系管理员处理。",
+  already_bound_other: "该飞书账号已绑定其他工作台成员，请先解绑后再试。",
+  bind_failed: "飞书账号绑定失败，请稍后重试。",
+};
+
+const FEISHU_OAUTH_NOTICES: Record<string, string> = {
+  logged_in: "已通过飞书登录",
+  bound: "飞书账号绑定成功，下次可直接扫码登录",
+};
+
+function readFeishuOAuthFlash(): { error: string; notice: string } {
+  const url = new URL(window.location.href);
+  const errorCode = url.searchParams.get("feishu_error");
+  const noticeCode = url.searchParams.get("feishu_notice");
+  if (!errorCode && !noticeCode) return { error: "", notice: "" };
+  return {
+    error: errorCode ? (FEISHU_OAUTH_ERRORS[errorCode] ?? "飞书登录或绑定失败，请重试。") : "",
+    notice: noticeCode ? (FEISHU_OAUTH_NOTICES[noticeCode] ?? "") : "",
+  };
+}
+
 function Gate() {
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [user, setUser] = useState<SessionUser | null>(null);
   const [hasUsers, setHasUsers] = useState(true);
+  const [feishuLoginEnabled, setFeishuLoginEnabled] = useState(false);
+  const [feishuFlash, setFeishuFlash] = useState<{ error: string; notice: string }>(() => readFeishuOAuthFlash());
   const [meta, setMeta] = useState<Meta | null>(null);
   const [unread, setUnread] = useState(0);
   const [error, setError] = useState("");
+  const toast = useToast();
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    if (!url.searchParams.has("feishu_error") && !url.searchParams.has("feishu_notice")) return;
+    url.searchParams.delete("feishu_error");
+    url.searchParams.delete("feishu_notice");
+    window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  }, []);
 
   const boot = useCallback(async () => {
     setState("loading");
@@ -35,6 +76,7 @@ function Gate() {
       const [bootstrap, metaData] = await Promise.all([api.bootstrap(), api.meta()]);
       setUser(bootstrap.user);
       setHasUsers(bootstrap.hasUsers);
+      setFeishuLoginEnabled(Boolean(bootstrap.feishuLoginEnabled));
       setMeta(metaData);
       setState("ready");
     } catch (err) {
@@ -46,6 +88,18 @@ function Gate() {
   useEffect(() => {
     void boot();
   }, [boot]);
+
+  useEffect(() => {
+    if (state !== "ready") return;
+    if (feishuFlash.notice) {
+      toast.push(feishuFlash.notice, "success");
+      setFeishuFlash((prev) => ({ ...prev, notice: "" }));
+    }
+    if (user && feishuFlash.error) {
+      toast.push(feishuFlash.error, "error");
+      setFeishuFlash((prev) => ({ ...prev, error: "" }));
+    }
+  }, [state, user, feishuFlash, toast]);
 
   const refreshUnread = useCallback(async () => {
     if (!user) return;
@@ -88,9 +142,12 @@ function Gate() {
     return (
       <AuthScreen
         hasUsers={hasUsers}
+        feishuLoginEnabled={feishuLoginEnabled}
+        initialError={feishuFlash.error}
         onAuthed={(next) => {
           setUser(next);
           setHasUsers(true);
+          setFeishuFlash({ error: "", notice: "" });
         }}
       />
     );
@@ -101,9 +158,17 @@ function Gate() {
       <Routes
         user={user}
         meta={meta}
+        onUserUpdated={setUser}
+        onFeishuConfigChanged={(enabled) => setFeishuLoginEnabled(enabled)}
         onLogout={async () => {
           await api.logout();
           setUser(null);
+          try {
+            const refreshed = await api.bootstrap();
+            setFeishuLoginEnabled(Boolean(refreshed.feishuLoginEnabled));
+          } catch {
+            /* 保持当前飞书登录开关状态 */
+          }
         }}
         onNotify={() => void refreshUnread()}
       />
@@ -114,11 +179,15 @@ function Gate() {
 function Routes({
   user,
   meta,
+  onUserUpdated,
+  onFeishuConfigChanged,
   onLogout,
   onNotify,
 }: {
   user: SessionUser;
   meta: Meta;
+  onUserUpdated: (user: SessionUser) => void;
+  onFeishuConfigChanged: (enabled: boolean) => void;
   onLogout: () => Promise<void>;
   onNotify: () => void;
 }) {
@@ -169,22 +238,44 @@ function Routes({
   else if (path === "/candidates") page = <CandidatesPage meta={meta} canWrite={canWrite} />;
   else if (path === "/interviews") page = <InterviewsPage meta={meta} canWrite={canWrite} />;
   else if (path === "/settings")
-    page = <SettingsPage user={user} meta={meta} onLogout={() => void onLogout()} />;
+    page = (
+      <SettingsPage
+        user={user}
+        meta={meta}
+        onUserUpdated={onUserUpdated}
+        onFeishuConfigChanged={onFeishuConfigChanged}
+        onLogout={() => void onLogout()}
+      />
+    );
   else page = <DashboardPage meta={meta} user={user} />;
 
   return page;
 }
 
 
-function AuthScreen({ hasUsers, onAuthed }: { hasUsers: boolean; onAuthed: (user: SessionUser) => void }) {
+function AuthScreen({
+  hasUsers,
+  feishuLoginEnabled,
+  initialError,
+  onAuthed,
+}: {
+  hasUsers: boolean;
+  feishuLoginEnabled: boolean;
+  initialError?: string;
+  onAuthed: (user: SessionUser) => void;
+}) {
   // 只有系统里还没有用户时才开放自助注册，之后成员由管理员在设置页添加
   const mode: "login" | "register" = hasUsers ? "login" : "register";
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState(initialError ?? "");
   const toast = useToast();
+
+  useEffect(() => {
+    if (initialError) setError(initialError);
+  }, [initialError]);
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -268,6 +359,22 @@ function AuthScreen({ hasUsers, onAuthed }: { hasUsers: boolean; onAuthed: (user
             {mode === "register" ? "创建并进入" : "登录"}
           </Button>
         </form>
+        {mode === "login" && feishuLoginEnabled && (
+          <div className="auth-feishu">
+            <div className="auth-divider" aria-hidden>
+              <span>或</span>
+            </div>
+            <a className="btn btn-md btn-secondary auth-feishu-btn" href="/api/auth/feishu/start?mode=login">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+                <rect x="3.5" y="3.5" width="7" height="7" rx="1.2" stroke="currentColor" strokeWidth="1.5" />
+                <rect x="13.5" y="3.5" width="7" height="7" rx="1.2" stroke="currentColor" strokeWidth="1.5" />
+                <rect x="3.5" y="13.5" width="7" height="7" rx="1.2" stroke="currentColor" strokeWidth="1.5" />
+                <path d="M14 14h2.5v2.5H14V14Zm4 0h2.5v2.5H18V14Zm-4 4h2.5v2.5H14V18Zm4 0h2.5v2.5H18V18Z" fill="currentColor" />
+              </svg>
+              使用飞书登录
+            </a>
+          </div>
+        )}
         {!hasUsers && (
           <p className="auth-hint">系统还没有账号，先创建第一位管理员。</p>
         )}
@@ -295,7 +402,7 @@ function AuthScreen({ hasUsers, onAuthed }: { hasUsers: boolean; onAuthed: (user
             <span>安排时间，记录评分和结论。</span>
           </li>
         </ol>
-        <p className="aside-note">飞书登录、消息和日历先留好位置，平台跑通后再接入。</p>
+        <p className="aside-note">飞书扫码登录与群机器人推送已支持接入，面试日历同步将按阶段开启。</p>
       </aside>
     </div>
   );

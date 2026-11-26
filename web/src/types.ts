@@ -14,6 +14,7 @@ export interface SessionUser {
   /** 登录账号名（可与邮箱二选一登录）；未设置时为空 */
   username?: string | null;
   role: Role;
+  feishu_open_id?: string | null;
 }
 
 export interface Meta {
@@ -314,12 +315,49 @@ export interface FeishuStatus {
     app_secret: boolean;
     verification_token: boolean;
     bot_webhook: boolean;
+    bot_secret: boolean;
     calendar_id: boolean;
   };
   ready: { login: boolean; notifications: boolean; calendar: boolean };
+  callbackUrl?: string;
   pendingNotifications: number;
+  failedNotifications: number;
+  sentNotifications: number;
   updatedAt: string | null;
   checklist: Array<{ key: string; label: string; description: string; done: boolean }>;
+}
+
+export interface FeishuAppTestResult {
+  ok: true;
+  latencyMs: number;
+  expiresIn: number;
+  endpoint: string;
+}
+
+export interface FeishuWebhookTestResult {
+  ok: true;
+  latencyMs: number;
+  signed: boolean;
+}
+
+export interface FeishuDispatchResult {
+  attempted: number;
+  sent: number;
+  failed: number;
+  skipped: number;
+  remainingPending: number;
+  items: Array<{
+    id: string;
+    status: string;
+    ok: boolean;
+    skipped?: boolean;
+    error?: string | null;
+  }>;
+}
+
+export interface FeishuSkipResult {
+  skipped: number;
+  remainingPending: number;
 }
 
 export interface NotificationItem {

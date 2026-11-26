@@ -1406,6 +1406,39 @@ a.inline-icon:hover {
   line-height: 1.6;
 }
 
+.auth-feishu {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  margin-top: var(--sp-2);
+}
+
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  color: var(--ink-3);
+  font-size: var(--fs-12);
+}
+
+.auth-divider::before,
+.auth-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
+.auth-feishu-btn {
+  width: 100%;
+  height: 38px;
+  text-decoration: none;
+}
+
+.auth-feishu-btn:hover {
+  text-decoration: none;
+}
+
 .auth-aside {
   position: relative;
   display: flex;
@@ -3207,6 +3240,7 @@ a.status-chip-more:hover {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: var(--sp-4);
   padding: var(--sp-3) 0 var(--sp-4);
   border-top: 1px solid var(--line);
@@ -3218,6 +3252,23 @@ a.status-chip-more:hover {
   gap: 2px;
 }
 
+.feishu-counters {
+  display: flex;
+  flex-direction: row !important;
+  align-items: flex-start;
+  gap: var(--sp-5) !important;
+}
+
+.feishu-counters > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.feishu-count-danger {
+  color: var(--danger);
+}
+
 .big-number {
   font-size: var(--fs-20);
   font-weight: 600;
@@ -3227,6 +3278,152 @@ a.status-chip-more:hover {
 .feishu-form {
   padding-top: var(--sp-4);
   border-top: 1px solid var(--line);
+}
+
+.feishu-callback-box {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  margin-bottom: var(--sp-4);
+  background: var(--surface-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+}
+
+.feishu-callback-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.feishu-callback-label {
+  font-size: var(--fs-12);
+  font-weight: 500;
+  color: var(--ink-2);
+}
+
+.feishu-callback-url {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: var(--fs-12);
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+  padding: 6px 10px;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.feishu-input-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.feishu-input-row .input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.feishu-clear-btn {
+  flex: 0 0 auto;
+  height: 34px;
+  padding: 0 10px;
+  font-size: var(--fs-12);
+  font-weight: 500;
+  color: var(--ink-2);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.feishu-clear-btn:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
+}
+
+.feishu-clear-btn.active {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: color-mix(in srgb, var(--danger) 40%, transparent);
+}
+
+.feishu-clear-btn:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.feishu-clear-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.team-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.team-controls a.btn {
+  text-decoration: none;
+}
+
+.team-controls a.btn:hover {
+  text-decoration: none;
+}
+
+.feishu-actions,
+.notify-head-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.notify-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  font-size: var(--fs-12);
+  margin-bottom: var(--sp-3);
+}
+
+.notify-notice {
+  margin: var(--sp-3) 0;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-13);
+  color: var(--brand-ink);
+  background: var(--brand-soft);
+  border: 1px solid color-mix(in srgb, var(--brand) 24%, transparent);
+  border-radius: var(--r-control);
+  word-break: break-word;
+}
+
+.notify-banner {
+  margin-bottom: var(--sp-3);
+}
+
+.notify-error {
+  margin-top: 3px;
+  font-size: var(--fs-12);
+  color: var(--danger);
+  word-break: break-word;
+}
+
+.notify-skip-note {
+  margin-top: 3px;
+  font-size: var(--fs-12);
+  color: var(--ink-3);
+  word-break: break-word;
 }
 
 .team-add {
@@ -3272,6 +3469,7 @@ a.status-chip-more:hover {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: var(--sp-3);
   padding: var(--sp-3) 0;
   border-bottom: 1px solid var(--line);
@@ -3286,6 +3484,7 @@ a.status-chip-more:hover {
 .notify-list li > div:first-child {
   display: flex;
   flex-direction: column;
+  flex: 1 1 220px;
   min-width: 0;
 }
 
@@ -3301,6 +3500,7 @@ a.status-chip-more:hover {
 .notify-meta {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--sp-2);
   flex: none;
 }

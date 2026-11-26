@@ -236,3 +236,22 @@
 - 浏览器冒烟 80/80 通过，控制台无错误。覆盖岗位画像只读各区块渲染、在线编辑行业并保存为第 2 版草稿再确认、以及 390/768/1440 px 浅色与 1440 px 深色主题零横向溢出。截图见[桌面画像](screenshots/portrait-review/job-profile-1440.png)、[深色桌面画像](screenshots/portrait-review/job-profile-dark-1440.png)、[平板画像](screenshots/portrait-review/job-profile-768.png)与[手机画像](screenshots/portrait-review/job-profile-390.png)。
 - 独立复核（`reviewer`）初审指出 5 项缺陷（2 High：旧版 1–2 标签兼容及编辑器删除下限与后端不一致；2 Medium：部门归类选回未指定残留旧部门、权重非整数/维度内失配缺实时告警；1 Low：切换特质未替换旧默认理由且未拦截空理由），均已修复并经独立复查全部更新为 `resolved`；后端单测增至 42/42 全通过（含历史 2 标签画像读取 → 编辑保存 → 确认 → 下游筛选完整链路），`coding_inspect sweep` 为 0 项问题。
 - 验证命令：`npm run check`（通过）、`npm run build`（通过）、`npm run test`（42/42 通过）、`HIRELOOP_SMOKE_SHOTS=screenshots/portrait-review npm run smoke`（80/80 通过）。注：本轮末期平台内置 `coding_check` 工具在工作区运行序号达到 1000 后返回工具错误 `Error: The coding operation could not be completed`，因此最终源码指纹的通过证据以本地命令输出与独立复核为准，平台自动验收状态暂为 `ready: false`（需在后续会话中重置或重跑 `coding_check`）。
+
+## 17. 飞书阶段二扫码登录与身份映射（含阶段一评审加固）
+
+2026-11-26 在隔离 Chrome 与临时数据库中验证。设计上下文沿用 `e21461eb97036d53b5c969eed884340316efad142df9481a7364f39628608229`，基线提交 `835249a3dde705add5f49c419b150e7da3c0c87c`，验证构建为 `index-Dii2cjtJ.js` 和 `index-DRsjmD7S.css`。
+
+- **核心能力**：
+  - 数据库启动迁移新增 `idx_users_feishu_open_id` 与 `idx_users_feishu_union_id` 两个局部唯一索引，防同一飞书身份重复绑给多个账号。
+  - 后端实现飞书 OIDC 网页授权闭环（`GET /api/auth/feishu/start`、`GET /api/auth/feishu/callback`、`POST /api/auth/feishu/unbind`、`GET /api/bootstrap` 返回 `feishuLoginEnabled`），采用一次性随机 `state` + `HttpOnly; SameSite=Lax` Cookie + `timingSafeEqual` 防 CSRF/重放；调用官方 `app_access_token` → `oidc/access_token` → `user_info` 接口换取 `open_id` / `union_id` / 邮箱。
+  - 扫码登录按 `open_id → union_id → 企业邮箱/邮箱` 匹配已有成员并签发既有 `hl_session`；未匹配成员按选项 A 拦截返回 `account_not_found`（不自动建号）；邮箱命中但已绑定其他飞书身份时拒绝覆盖（`email_bound_other`）。已登录成员可在设置页绑定/解绑本人飞书，管理员可解绑任意成员。
+  - 一并修复阶段一评审问题与安全加固：`skipPendingFeishuNotifications` 避开在途投递且单条跳过幂等不覆盖失败原因；飞书外发请求强制 `redirect: 'error'`；Webhook 校验拒绝 query/hash；诊断脱敏遮蔽已保存密钥、`a-` 应用令牌与一次性 `code`；设置页支持清空已保存可选配置项并同步出站箱与状态卡计数；服务端统一通过 `resolveFeishuPublicOrigin` 生成 `callbackUrl` 并同步展示在设置页支持一键复制。
+- **浏览器与视觉验证**：
+  - `npm run smoke`（80/80 通过）与 `npm run smoke:permissions`（9/9 通过），控制台零错误。
+  - 专项隔离 Chrome 验证覆盖登录页飞书扫码入口与 `account_not_found` 错误横幅、URL 参数清理、设置页回调地址展示与一键复制、清空已保存密钥并保存、成员列表飞书绑定徽章与绑定按钮；1440 / 768 / 390 px 及浅色/深色模式下均零横向溢出。截图见[桌面登录页](screenshots/feishu-stage2/stage2-login-1440.png)、[设置页飞书配置](screenshots/feishu-stage2/stage2-settings-feishu-1440-light.png)、[设置页团队绑定](screenshots/feishu-stage2/stage2-settings-team-1440-light.png)与[手机深色设置页](screenshots/feishu-stage2/stage2-settings-390-dark.png)。
+- **独立复核与收口**：
+  - 独立评审 `reviewer-stage2` 初审提出 1 High、3 Medium、4 Low 共 8 项问题（反代头默认信任与松散 Host 校验、回调先清 Cookie/删 state 再验 CSRF、`bindFeishuToUser` 换绑保留旧 `union_id`、`useState` 初始化调用 `replaceState` 在 `<StrictMode>` 下吞掉提示、邮箱匹配 `union_id=null` 守卫、设置页 `callbackUrl` 未同步 `HIRELOOP_PUBLIC_ORIGIN`、`a-` 令牌与 `code` 脱敏补齐、清空按钮无障碍属性及管理员解绑他人测试）。8 项已全部修复并补充完整回归测试，经 `reviewer-stage2` 独立复查全部批准并将 4 项登记的 `coding_review` 发现全部更新为 `resolved`。
+- **验证命令与边界说明**：
+  - `npm run check`（通过）、`npm run build`（通过）、`npm test`（52/52 通过）、`npm run smoke`（80/80 通过）、`npm run smoke:permissions`（9/9 通过）。
+  - 真实飞书客户端扫码回调需在飞书开放平台「安全设置 → 重定向 URL」登记工作台设置页展示的回调地址后由用户实机触发验证。
+  - 平台内置 `coding_check` 工具仍受该工作区既有故障影响返回 `Error: The coding operation could not be completed`，因此平台自动验收 `ready` 暂为 `false`，本轮交付以本地实跑命令、浏览器冒烟与独立评审通过作为完整证据。

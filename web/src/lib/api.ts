@@ -143,13 +143,24 @@ export interface InterviewInput {
 
 export const api = {
   bootstrap: () =>
-    request<{ hasUsers: boolean; user: SessionUser | null; sessionCookie: string }>("GET", "/bootstrap"),
+    request<{
+      hasUsers: boolean;
+      user: SessionUser | null;
+      sessionCookie: string;
+      feishuLoginEnabled: boolean;
+    }>("GET", "/bootstrap"),
   login: (email: string, password: string) =>
     request<{ user: SessionUser }>("POST", "/auth/login", { email, password }),
   register: (input: { name: string; email: string; password: string }) =>
     request<{ user: SessionUser }>("POST", "/auth/register", input),
   logout: () => request<{ ok: true }>("POST", "/auth/logout"),
   me: () => request<{ user: SessionUser }>("GET", "/auth/me"),
+  unbindFeishu: (userId?: string) =>
+    request<{ ok: true; user: SessionUser; unbound: boolean; items: SessionUser[] }>(
+      "POST",
+      "/auth/feishu/unbind",
+      userId ? { userId } : {},
+    ),
   changePassword: (currentPassword: string, nextPassword: string) =>
     request<{ ok: true }>("POST", "/auth/password", { currentPassword, nextPassword }),
 
@@ -241,6 +252,13 @@ export const api = {
   testLlm: () => request<AiResult<{ latencyMs: number; model: string }>>("POST", "/settings/llm/test"),
   feishu: () => request<FeishuStatus>("GET", "/settings/feishu"),
   saveFeishu: (patch: Record<string, string>) => request<FeishuStatus>("PUT", "/settings/feishu", patch),
+  testFeishuApp: () => request<import("../types").FeishuAppTestResult>("POST", "/settings/feishu/test-app", {}),
+  testFeishuWebhook: () =>
+    request<import("../types").FeishuWebhookTestResult>("POST", "/settings/feishu/test-webhook", {}),
+  dispatchFeishuNotifications: (input?: { notificationId?: string; limit?: number; includeFailed?: boolean }) =>
+    request<import("../types").FeishuDispatchResult>("POST", "/notifications/feishu/dispatch", input ?? {}),
+  skipPendingFeishuNotifications: (input?: { notificationId?: string }) =>
+    request<import("../types").FeishuSkipResult>("POST", "/notifications/feishu/skip-pending", input ?? {}),
 
   team: () => request<{ items: SessionUser[] }>("GET", "/team"),
   setRole: (userId: string, role: string) =>

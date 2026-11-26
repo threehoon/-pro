@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { api, ApiError, type JobInput } from "../lib/api";
 import { salaryText, timeAgo } from "../lib/format";
 import { Link } from "../lib/router";
@@ -17,6 +17,7 @@ import {
   PageHeader,
   SearchInput,
   Select,
+  TabPanels,
   Tabs,
   Textarea,
   useToast,
@@ -27,6 +28,7 @@ import { StageTrack } from "../components/StageTrack";
 const STAGES: Stage[] = ["new", "screening", "interview", "offer", "hired"];
 
 export function JobsPage({ meta, user }: { meta: Meta; user: { id: string; role: string } }) {
+  const tabIdBase = useId();
   const [items, setItems] = useState<Job[]>([]);
   const [totals, setTotals] = useState({ open: 0, closed: 0, headcount: 0 });
   const [status, setStatus] = useState("open");
@@ -34,32 +36,46 @@ export function JobsPage({ meta, user }: { meta: Meta; user: { id: string; role:
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [editing, setEditing] = useState<Job | "new" | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
   const toast = useToast();
+  // 快速切换分类/输入时后发的请求可能先返回，用序号丢弃过期响应
+  const requestSeq = useRef(0);
 
   const load = useCallback(() => {
+    const seq = ++requestSeq.current;
     setLoading(true);
     setError("");
     api
       .jobs({ status, q: query.trim() || undefined })
       .then((data) => {
+        if (seq !== requestSeq.current) return;
         setItems(data.items);
         setTotals(data.totals);
       })
-      .catch((err: unknown) => setError(err instanceof ApiError ? err.message : "职位加载失败"))
-      .finally(() => setLoading(false));
+      .catch((err: unknown) => {
+        if (seq !== requestSeq.current) return;
+        setError(err instanceof ApiError ? err.message : "职位加载失败");
+      })
+      .finally(() => {
+        if (seq === requestSeq.current) setLoading(false);
+      });
   }, [status, query]);
 
   useEffect(() => {
+    // 条件一变就作废在途请求：分类 Tab 支持方向键快速切换，否则后返回的旧响应会覆盖新结果
+    requestSeq.current += 1;
+    setLoading(true);
     const timer = window.setTimeout(load, query ? 220 : 0);
     return () => window.clearTimeout(timer);
-  }, [load, query]);
+    // reloadKey 让「删除/保存完成后刷新」走同一处调度：直接调 load() 会用到点击时的旧分类
+  }, [load, query, reloadKey]);
 
   async function remove(job: Job) {
     if (!window.confirm(`删除职位「${job.title}」？如果已有投递，请改为关闭职位。`)) return;
     try {
       await api.deleteJob(job.id);
       toast.push("职位已删除", "success");
-      load();
+      setReloadKey((value) => value + 1);
     } catch (err) {
       toast.push(err instanceof ApiError ? err.message : "删除失败", "error");
     }
@@ -68,6 +84,13 @@ export function JobsPage({ meta, user }: { meta: Meta; user: { id: string; role:
   const headcountOpen = items
     .filter((job) => job.status === "open")
     .reduce((sum, job) => sum + job.headcount, 0);
+
+  const tabs = [
+    { value: "open", label: "在招", count: totals.open },
+    { value: "paused", label: "已暂停" },
+    { value: "closed", label: "已关闭", count: totals.closed },
+    { value: "all", label: "全部" },
+  ];
 
   return (
     <div className="page">
@@ -83,58 +106,57 @@ export function JobsPage({ meta, user }: { meta: Meta; user: { id: string; role:
 
       <div className="toolbar">
         <Tabs
+          idBase={tabIdBase}
+          label="按职位状态筛选"
           value={status}
           onChange={setStatus}
-          tabs={[
-            { value: "open", label: "在招", count: totals.open },
-            { value: "paused", label: "已暂停" },
-            { value: "closed", label: "已关闭", count: totals.closed },
-            { value: "all", label: "全部" },
-          ]}
+          tabs={tabs}
         />
         <div className="toolbar-right">
           <SearchInput value={query} onChange={setQuery} placeholder="搜索职位、部门或城市" />
         </div>
       </div>
 
-      {loading && <ListSkeleton rows={4} />}
-      {error && <ErrorState message={error} onRetry={load} />}
+      <TabPanels idBase={tabIdBase} tabs={tabs} value={status} busy={loading}>
+        {loading && <ListSkeleton rows={4} />}
+        {error && <ErrorState message={error} onRetry={load} />}
 
-      {!loading && !error && items.length === 0 && (
-        <EmptyState
-          title={query ? "没有匹配的职位" : "还没有职位"}
-          description={query ? "换个关键词，或清空搜索。" : "先建一个职位，候选人才能进入招聘流程。"}
-          action={
-            !query ? (
-              <Button variant="primary" onClick={() => setEditing("new")}>
-                新建职位
-              </Button>
-            ) : undefined
-          }
-        />
-      )}
+        {!loading && !error && items.length === 0 && (
+          <EmptyState
+            title={query ? "没有匹配的职位" : "还没有职位"}
+            description={query ? "换个关键词，或清空搜索。" : "先建一个职位，候选人才能进入招聘流程。"}
+            action={
+              !query ? (
+                <Button variant="primary" onClick={() => setEditing("new")}>
+                  新建职位
+                </Button>
+              ) : undefined
+            }
+          />
+        )}
 
-      {!loading && !error && items.length > 0 && (
-        <>
-          <p className="list-note">
-            共 {items.length} 个职位 · 在招编制 {headcountOpen} 人
-          </p>
-          <div className="job-grid">
-            {items.map((job, index) => (
-              <JobCard
-                key={job.id}
-                job={job}
-                meta={meta}
-                index={index}
-                canEdit={user.role !== "hiring_manager"}
-                canDelete={user.role === "admin"}
-                onEdit={() => setEditing(job)}
-                onDelete={() => void remove(job)}
-              />
-            ))}
-          </div>
-        </>
-      )}
+        {!loading && !error && items.length > 0 && (
+          <>
+            <p className="list-note">
+              共 {items.length} 个职位 · 在招编制 {headcountOpen} 人
+            </p>
+            <div className="job-grid">
+              {items.map((job, index) => (
+                <JobCard
+                  key={job.id}
+                  job={job}
+                  meta={meta}
+                  index={index}
+                  canEdit={user.role !== "hiring_manager"}
+                  canDelete={user.role === "admin"}
+                  onEdit={() => setEditing(job)}
+                  onDelete={() => void remove(job)}
+                />
+              ))}
+            </div>
+          </>
+        )}
+      </TabPanels>
 
       <JobFormModal
         open={Boolean(editing)}
@@ -143,7 +165,7 @@ export function JobsPage({ meta, user }: { meta: Meta; user: { id: string; role:
         onClose={() => setEditing(null)}
         onSaved={() => {
           setEditing(null);
-          load();
+          setReloadKey((value) => value + 1);
         }}
       />
     </div>

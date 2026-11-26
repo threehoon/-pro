@@ -518,6 +518,11 @@ svg {
   min-width: 168px;
 }
 
+.toolbar .candidate-job-filter {
+  max-width: min(100%, 320px);
+  text-overflow: ellipsis;
+}
+
 .list-note {
   font-size: var(--fs-13);
   color: var(--ink-3);
@@ -1204,6 +1209,34 @@ a.inline-icon:hover {
 
 .tab.active .tab-count {
   color: var(--brand);
+}
+
+.tab-panel:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+}
+
+/* 候选人流程分类：容器变窄时整体换行，任何宽度都不隐藏后面的分类 */
+.group-tabs {
+  margin-bottom: var(--sp-3);
+}
+
+.group-tabs .tabs {
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+
+/* 手机上一行放不下：两行铺满，点按目标更大也更好扫读 */
+@media (max-width: 700px) {
+  .group-tabs .tabs {
+    width: 100%;
+  }
+
+  .group-tabs .tab {
+    flex: 1 1 auto;
+    justify-content: center;
+  }
 }
 
 /* empty / loading / error */

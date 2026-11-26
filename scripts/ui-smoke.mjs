@@ -213,9 +213,155 @@ await waitFor(`location.pathname === '/jobs/${jobId}/screening' && Boolean(docum
 check('键盘可从概览切到简历筛选', await ev(`document.querySelector('.subtab.active')?.getAttribute('href') === '/jobs/${jobId}/screening'`));
 check('画像未确认时提示去确认', await ev(`Boolean(document.querySelector('.resume-import a[href="/jobs/${jobId}/profile"]')) && !document.querySelector('#resume-import-file')`));
 
+const activeTab = 'document.querySelector(\'[role=tab][aria-selected=true]\')';
+const activePanel = 'document.querySelector(\'[role=tabpanel]:not([hidden])\')';
+const tabCounts = 'document.querySelectorAll(\'.group-tabs .tab-count\')';
+const countNote = 'document.querySelector(\'.toolbar .list-note\')';
+const press = async (key, windowsVirtualKeyCode) => {
+  const event = { key, code: key, windowsVirtualKeyCode };
+  await send('Input.dispatchKeyEvent', { type: 'keyDown', ...event, ...(key === 'Enter' ? { text: '\r' } : {}) });
+  await send('Input.dispatchKeyEvent', { type: 'keyUp', ...event });
+};
+const checkResultTabs = async (label, count) => {
+  const tablist = `document.querySelector('[role=tablist][aria-label="${label}"]')`;
+  await waitFor(`${tablist}?.querySelectorAll('[role=tab]').length === ${count}`, label);
+  const initialId = await ev(`${activeTab}.id`);
+  await ev(`${activeTab}.focus()`);
+  await press('ArrowRight', 39);
+  await waitFor(`${activeTab}.id !== ${JSON.stringify(initialId)} && document.activeElement === ${activeTab}`, `${label}方向键切换`);
+  check(`${label}的每个标签都关联到对应结果区，只有当前面板可见`, await ev(`(() => {
+    const tabs = [...${tablist}.querySelectorAll('[role=tab]')];
+    const panelIds = tabs.map(tab => tab.getAttribute('aria-controls'));
+    return new Set(panelIds).size === tabs.length && new Set(tabs.map(tab => tab.id)).size === tabs.length
+      && tabs.every((tab, index) => {
+        const panel = document.getElementById(panelIds[index]);
+        const selected = tab === ${activeTab};
+        return panel?.getAttribute('role') === 'tabpanel' && panel.getAttribute('aria-labelledby') === tab.id
+          && panel.checkVisibility() === selected && tab.tabIndex === (selected ? 0 : -1)
+          && panel.tabIndex === (selected ? 0 : -1);
+      });
+  })()`));
+  for (let step = 0; step < 5 && !(await ev(`document.activeElement === ${activePanel}`)); step += 1) {
+    await press('Tab', 9);
+  }
+  check(`${label}可用方向键切换，并用 Tab 进入结果区`, await ev(`document.activeElement === ${activePanel}`));
+};
+
+const candidateJobFilter = `document.querySelector('select[aria-label="按投递职位筛选"]')`;
+const setCandidateJob = (value) => ev(`(() => {
+  const select = ${candidateJobFilter};
+  select.value = ${JSON.stringify(value)};
+  select.dispatchEvent(new Event('change', { bubbles: true }));
+})()`);
+const candidateSearch = `document.querySelector('.toolbar .search-input input')`;
+const setCandidateQuery = (query) => ev(`(() => {
+  const input = ${candidateSearch};
+  Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, ${JSON.stringify(query)});
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+})()`);
+const clearCandidateFilters = `([...document.querySelectorAll('.toolbar button')].find(button => button.textContent.trim() === '清空筛选'))`;
+
 // 从候选人页投递到新职位
+const failJobOptions = !EXTERNAL && await send('Page.addScriptToEvaluateOnNewDocument', { source: `(() => {
+  const fetch = window.fetch;
+  window.fetch = (input, options) => {
+    if (typeof input === 'string' && new URL(input, location.origin).pathname === '/api/job-options') {
+      window.fetch = fetch;
+      return Promise.resolve(Response.json({ error: { message: '职位选项测试失败' } }, { status: 503 }));
+    }
+    return fetch(input, options);
+  };
+})()` });
 await send('Page.navigate', { url: `${BASE}/candidates` });
 await waitFor(`!!document.querySelector('.data-table tbody tr')`, 'candidate rows');
+if (failJobOptions) {
+  await send('Page.removeScriptToEvaluateOnNewDocument', { identifier: failJobOptions.identifier });
+  const retryJobOptions = `([...document.querySelectorAll('.toolbar button')].find(button => button.textContent.includes('职位加载失败')))`;
+  await waitFor(`Boolean(${retryJobOptions})`, '职位筛选选项失败');
+  const listRemainsUsable = await ev(`${candidateJobFilter}.disabled && Boolean(document.querySelector('.data-table'))`);
+  await ev(`${retryJobOptions}.focus()`);
+  await press('Enter', 13);
+  await waitFor(`!${candidateJobFilter}.disabled`, '职位筛选选项重试成功');
+  check('职位选项失败时仍可查看候选人，键盘重试后焦点回到搜索框', listRemainsUsable && await ev(`document.activeElement === ${candidateSearch}`));
+}
+await waitFor(`!!${candidateJobFilter}?.querySelector('option[value="${jobId}"]')`, '真实招聘职位选项');
+check('候选人默认显示全部职位，并可选择实际招聘职位', await ev(`
+  ${candidateJobFilter}.selectedOptions[0].textContent === '全部职位'
+  && ${candidateJobFilter}.querySelector('option[value="${jobId}"]').textContent.includes(${JSON.stringify(jobTitle)})
+  && !document.querySelector('select[aria-label="按技能筛选"]')
+`));
+await checkResultTabs('按流程阶段分类', 8);
+await waitFor(`${activePanel}.getAttribute('aria-busy') === 'false'`, '分类结果返回');
+await capture('candidate-groups', 390, '.group-tabs');
+check('窄屏候选人分类完整可见', await ev(`(() => {
+  const list = document.querySelector('.group-tabs .tabs');
+  return [...list.querySelectorAll('[role=tab]')].every(tab => tab.getBoundingClientRect().right <= list.getBoundingClientRect().right);
+})()`));
+await capture('candidate-groups', 1440, '.group-tabs');
+await ev(`document.querySelector('.group-tabs [role=tab]').click()`);
+await waitFor(`${tabCounts}.length === 8 && !!document.querySelector('.data-table tbody tr')`, '候选人恢复全部');
+
+if (!EXTERNAL) {
+  // 只拦截两次指定搜索，由测试控制响应顺序，其他请求继续使用隔离服务。
+  const lateQuery = 'smoke-late-' + Date.now();
+  const emptyQuery = 'smoke-empty-' + Date.now();
+  await ev(`(() => {
+    const originalFetch = window.fetch;
+    let pauseEmpty = true;
+    window.candidateRequests = { restore: () => { window.fetch = originalFetch; } };
+    window.fetch = (input, options) => {
+      if (typeof input !== 'string') return originalFetch(input, options);
+      const url = new URL(input, location.origin);
+      if (url.pathname !== '/api/candidates') return originalFetch(input, options);
+      const q = url.searchParams.get('q');
+      if (q === ${JSON.stringify(lateQuery)}) return new Promise(resolve => {
+        window.candidateRequests.releaseLate = resolve;
+      });
+      if (q === ${JSON.stringify(emptyQuery)} && pauseEmpty) {
+        pauseEmpty = false;
+        return new Promise(resolve => { window.candidateRequests.releaseEmpty = resolve; });
+      }
+      return originalFetch(input, options);
+    };
+  })()`);
+  const noStaleCounts = `${tabCounts}.length === 0 && !/\\d/.test(${countNote}.textContent)`;
+  const seededList = await ev(`fetch('/api/candidates?pageSize=1').then(response => response.json())`);
+  await setCandidateQuery(lateQuery);
+  check('关键词变化即隐藏旧分类人数、总数和结果', await ev(`
+    ${noStaleCounts} && ${activePanel}.getAttribute('aria-busy') === 'true'
+    && Boolean(${activePanel}.querySelector('.list-skeleton')) && !${activePanel}.querySelector('.data-table')
+  `));
+  await waitFor(`typeof window.candidateRequests.releaseLate === 'function'`, '旧候选人请求等待响应');
+  await setCandidateQuery(emptyQuery);
+  await waitFor(`typeof window.candidateRequests.releaseEmpty === 'function'`, '新候选人请求等待响应');
+  await ev(`window.candidateRequests.releaseEmpty(Response.json({ error: { message: '候选人加载测试失败' } }, { status: 503 }))`);
+  await waitFor(`${activePanel}.querySelector('[role=alert]')?.textContent.includes('候选人加载测试失败')`, '候选人失败态');
+  check('候选人请求失败后不显示旧人数，仍可切换分类和重试', await ev(`
+    ${noStaleCounts} && ${activePanel}.getAttribute('aria-busy') === 'false'
+    && ${activePanel}.querySelector('[role=alert] button').textContent.trim() === '重试'
+    && document.querySelectorAll('.group-tabs [role=tab]:enabled').length === 8
+  `));
+  await ev(`${activePanel}.querySelector('[role=alert] button').focus()`);
+  await press('Enter', 13);
+  await waitFor(`${activePanel}.querySelector('.empty-state')?.textContent.includes('没有匹配的候选人')`, '候选人重试返回空结果');
+  const allCountsZero = `${tabCounts}.length === 8 && [...${tabCounts}].every(count => count.textContent === '0') && ${countNote}.textContent.trim() === '筛出 0 位'`;
+  check('候选人重试成功显示真实的零人数，并保留键盘焦点', await ev(`${allCountsZero} && document.activeElement === ${activePanel}`));
+  await ev(`new Promise(resolve => {
+    window.candidateRequests.releaseLate(Response.json(${JSON.stringify(seededList)}));
+    requestAnimationFrame(() => requestAnimationFrame(resolve));
+  })`);
+  check('较早的候选人响应不能覆盖重试结果', await ev(allCountsZero));
+  await ev(`window.candidateRequests.restore()`);
+  await setCandidateQuery('');
+  await waitFor(`${tabCounts}.length === 8 && !!document.querySelector('.data-table tbody tr')`, '候选人清空关键词');
+}
+
+await setCandidateJob(jobId);
+await waitFor(`${activePanel}.querySelector('.empty-state')?.textContent.includes('没有匹配的候选人')`, '新职位没有投递');
+check('没有投递的职位返回空结果与零人数', await ev(`${tabCounts}.length === 8 && [...${tabCounts}].every(count => count.textContent === '0')`));
+await ev(`${clearCandidateFilters}.click()`);
+await waitFor(`${candidateJobFilter}.value === '' && Boolean(document.querySelector('.data-table tbody tr a'))`, '清空职位筛选');
+const candidateLink = await ev(`document.querySelector('.data-table tbody tr a').getAttribute('href')`);
 await ev(`document.querySelector('.data-table tbody tr a').click()`);
 await waitFor(`!!document.querySelector('.profile-head')`, 'candidate detail');
 const headState = await ev(`(() => {
@@ -277,6 +423,32 @@ if (priorApplicationCount === 0) {
   const moreBadge = await ev(`document.querySelector('.profile-actions .status-chip-more').textContent.trim()`);
   check('多条投递在头部显示 +N', moreBadge === `+${priorApplicationCount}`, `${moreBadge} (priorApplicationCount=${priorApplicationCount})`);
 }
+
+await send('Page.navigate', { url: `${BASE}/candidates` });
+await waitFor(`!!${candidateJobFilter}?.querySelector('option[value="${jobId}"]')`, '候选人页加载职位');
+await setCandidateJob(jobId);
+await waitFor(`${countNote}?.textContent.trim() === '筛出 1 位'`, '仅显示该职位的投递');
+check('职位筛选显示刚投递的候选人及该职位的流程阶段', await ev(`(() => {
+  const rows = [...document.querySelectorAll('.data-table tbody tr')];
+  return rows.length === 1 && rows[0].querySelector('a').getAttribute('href') === ${JSON.stringify(candidateLink)}
+    && rows[0].textContent.includes('待筛选') && ${tabCounts}[1].textContent === '1';
+})()`));
+await ev(`${activeTab}.focus()`);
+await press('ArrowRight', 39);
+await waitFor(`${countNote}?.textContent.trim() === '「待筛选」1 位'`, '职位与流程分类叠加');
+const filteredRow = await ev(`document.querySelector('.data-table tbody tr a').textContent`);
+await setCandidateQuery(filteredRow);
+await waitFor(`${countNote}?.textContent.trim() === '「待筛选」1 位'`, '职位、搜索与流程分类叠加');
+check('职位可与流程阶段和候选人关键词叠加', await ev(`${candidateJobFilter}.value === ${JSON.stringify(jobId)} && document.querySelector('.data-table tbody tr a').getAttribute('href') === ${JSON.stringify(candidateLink)}`));
+await capture('candidate-job-filter', 390, '.candidate-job-filter');
+await capture('candidate-job-filter', 1440, '.candidate-job-filter');
+await ev(`${clearCandidateFilters}.focus()`);
+await press('Enter', 13);
+await waitFor(`${countNote}?.textContent.startsWith('共 ')`, '清空组合筛选后恢复全部');
+check('键盘清空重置职位、流程阶段和关键词，焦点回到搜索框', await ev(`
+  ${candidateJobFilter}.value === '' && ${activeTab} === document.querySelector('.group-tabs [role=tab]')
+    && ${candidateSearch}.value === '' && document.activeElement === ${candidateSearch}
+`));
 
 // 3. 从看板进入指定投递，并确认筛选
 const button = (label, scope = 'body') => `([...document.querySelectorAll(${JSON.stringify(scope + ' button')})].find(b => b.textContent.trim() === ${JSON.stringify(label)} && !b.disabled) ?? null)`;
@@ -623,6 +795,84 @@ await capture('screening-dark', 1440, '.resume-import');
 await send('Page.navigate', { url: `${BASE}/jobs/${jobId}/profile` });
 await waitFor(`document.documentElement.dataset.theme === 'dark' && Boolean(document.querySelector('#profile .profile-sheet'))`, '深色主题岗位画像页');
 await capture('job-profile-dark', 1440, '#profile .profile-sheet');
+await send('Page.navigate', { url: `${BASE}/candidates` });
+await waitFor(`${tabCounts}.length === 8`, '深色候选人分类');
+await capture('candidate-groups-dark', 1440, '.group-tabs');
+
+if (!EXTERNAL) {
+  await ev(`(async () => {
+    const { total } = await fetch('/api/candidates?pageSize=1').then(response => response.json());
+    for (let n = total; n < 21; n += 1) {
+      const response = await fetch('/api/candidates', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: '翻页测试候选人 ' + n }),
+      });
+      if (!response.ok) throw new Error('创建翻页测试候选人失败');
+    }
+  })()`);
+  await send('Page.navigate', { url: `${BASE}/candidates` });
+  await waitFor(`Boolean(document.querySelector('.pagination button:last-child:not(:disabled)'))`, '候选人可翻页');
+  await ev(`document.querySelector('.pagination button:last-child').focus()`);
+  await press('Enter', 13);
+  await waitFor(`document.querySelector('.pagination > span')?.textContent.trim().startsWith('2 /')`, '候选人第二页');
+  check('候选人键盘翻页后焦点留在结果区', await ev(`document.activeElement === ${activePanel}`));
+}
+
+await send('Page.navigate', { url: `${BASE}/jobs` });
+await waitFor(`!!document.querySelector('.job-card')`, '职位列表结果');
+await checkResultTabs('按职位状态筛选', 4);
+
+if (!EXTERNAL) {
+  const disposableJobId = await ev(`(async () => {
+    const response = await fetch('/api/jobs', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: '延迟删除测试职位' }),
+    });
+    if (!response.ok) throw new Error('创建删除测试职位失败');
+    return (await response.json()).job.id;
+  })()`);
+  const disposableCard = `document.querySelector('.job-card a[href="/jobs/${disposableJobId}"]')?.closest('.job-card')`;
+  await ev(`document.querySelector('[role=tablist] [role=tab]').click()`);
+  await waitFor(`Boolean(${disposableCard})`, '待删除职位卡片');
+  await ev(`(() => {
+    const originalFetch = window.fetch;
+    let deletionReleased = false;
+    window.jobsRefreshedAfterDeletion = [];
+    window.fetch = (input, options) => {
+      if (input === '/api/jobs/${disposableJobId}' && options?.method === 'DELETE') {
+        return new Promise(resolve => {
+          window.releaseJobDeletion = () => {
+            deletionReleased = true;
+            resolve(originalFetch(input, options));
+          };
+        });
+      }
+      if (deletionReleased && typeof input === 'string') {
+        const url = new URL(input, location.origin);
+        if (url.pathname === '/api/jobs') window.jobsRefreshedAfterDeletion.push(url.searchParams.get('status'));
+      }
+      return originalFetch(input, options);
+    };
+    const confirm = window.confirm;
+    window.confirm = () => true;
+    try { (${disposableCard}).querySelector('button[aria-label="删除职位"]').click(); }
+    finally { window.confirm = confirm; }
+  })()`);
+  await waitFor(`typeof window.releaseJobDeletion === 'function'`, '删除等待响应');
+  await ev(`${activeTab}.focus()`);
+  await press('ArrowRight', 39);
+  const pausedPanel = `${activeTab}.textContent.trim() === '已暂停' && ${activePanel}.getAttribute('aria-busy') === 'false'`;
+  await waitFor(pausedPanel, '已暂停职位结果');
+  const pausedTitles = await ev(`fetch('/api/jobs?status=paused').then(response => response.json()).then(data => data.items.map(job => job.title))`);
+  await ev(`window.releaseJobDeletion()`);
+  await waitFor(`window.jobsRefreshedAfterDeletion.length > 0 && document.body.textContent.includes('职位已删除') && (${pausedPanel})`, '删除后刷新已暂停结果');
+  check('删除职位完成后刷新当前分类，不覆盖为旧分类', await ev(`
+    window.jobsRefreshedAfterDeletion.every(status => status === 'paused')
+    && ${pausedPanel} && JSON.stringify([...${activePanel}.querySelectorAll('.job-card-title > a')].map(link => link.textContent)) === ${JSON.stringify(JSON.stringify(pausedTitles))}
+  `));
+}
+
+await send('Page.navigate', { url: `${BASE}/interviews` });
+await checkResultTabs('按面试状态筛选', 5);
+await waitFor(`${activePanel}.getAttribute('aria-busy') === 'false' && !!${activePanel}.querySelector('.agenda-week, .empty-state')`, '面试筛选结果');
 await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
 check('减少动态效果时页面没有入场动画', await ev(`matchMedia('(prefers-reduced-motion: reduce)').matches && getComputedStyle(document.querySelector('.page')).animationName === 'none'`));
 

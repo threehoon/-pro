@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import { api, ApiError } from "../lib/api";
 import { fmtDateTime, fmtMonthDay, fmtTime, stageColor, weekday } from "../lib/format";
 import { Link } from "../lib/router";
@@ -15,6 +15,7 @@ import {
   Modal,
   PageHeader,
   Select,
+  TabPanels,
   Tabs,
   useToast,
 } from "../components/ui";
@@ -63,6 +64,7 @@ function dayKey(value: string | Date): string {
 }
 
 export function InterviewsPage({ meta, canWrite }: { meta: Meta; canWrite: boolean }) {
+  const tabIdBase = useId();
   const [weekStart, setWeekStart] = useState(() => startOfWeek(new Date()));
   const [status, setStatus] = useState("");
   const [items, setItems] = useState<Interview[]>([]);
@@ -141,6 +143,14 @@ export function InterviewsPage({ meta, canWrite }: { meta: Meta; canWrite: boole
     }
   }
 
+  const tabs = [
+    { value: "", label: "全部" },
+    { value: "scheduled", label: "待进行" },
+    { value: "summary", label: "待总结" },
+    { value: "completed", label: "已完成" },
+    { value: "cancelled", label: "已取消" },
+  ];
+
   return (
     <div className="page">
       <PageHeader
@@ -167,146 +177,144 @@ export function InterviewsPage({ meta, canWrite }: { meta: Meta; canWrite: boole
           </span>
         </div>
         <Tabs
+          idBase={tabIdBase}
+          label="按面试状态筛选"
           value={status}
           onChange={setStatus}
-          tabs={[
-            { value: "", label: "全部" },
-            { value: "scheduled", label: "待进行" },
-            { value: "summary", label: "待总结" },
-            { value: "completed", label: "已完成" },
-            { value: "cancelled", label: "已取消" },
-          ]}
+          tabs={tabs}
         />
       </div>
 
-      {loading && <ListSkeleton rows={5} />}
-      {error && <ErrorState message={error} onRetry={load} />}
+      <TabPanels idBase={tabIdBase} tabs={tabs} value={status} busy={loading}>
+        {loading && <ListSkeleton rows={5} />}
+        {error && <ErrorState message={error} onRetry={load} />}
 
-      {!loading && !error && filledDays.length === 0 && (
-        <EmptyState
-          title={status === "summary" ? "本周没有待总结的面试" : "这一周没有符合条件的面试"}
-          description="已安排时间的面试会显示在这里。"
-        />
-      )}
+        {!loading && !error && filledDays.length === 0 && (
+          <EmptyState
+            title={status === "summary" ? "本周没有待总结的面试" : "这一周没有符合条件的面试"}
+            description="已安排时间的面试会显示在这里。"
+          />
+        )}
 
-      {!loading && !error && filledDays.length > 0 && (
-        <div className="agenda-week">
-          {filledDays.map((day) => (
-            <section className={`agenda-day ${day.isToday ? "today" : ""}`} key={day.key}>
-              <header className="agenda-day-head">
-                <div className="agenda-date">
-                  <strong>{fmtMonthDay(day.key)}</strong>
-                  <span>
-                    {weekday(day.key)}
-                    {day.isToday ? " · 今天" : ""}
-                  </span>
-                </div>
-                <span className="agenda-count">{day.items.length} 场</span>
-              </header>
+        {!loading && !error && filledDays.length > 0 && (
+          <div className="agenda-week">
+            {filledDays.map((day) => (
+              <section className={`agenda-day ${day.isToday ? "today" : ""}`} key={day.key}>
+                <header className="agenda-day-head">
+                  <div className="agenda-date">
+                    <strong>{fmtMonthDay(day.key)}</strong>
+                    <span>
+                      {weekday(day.key)}
+                      {day.isToday ? " · 今天" : ""}
+                    </span>
+                  </div>
+                  <span className="agenda-count">{day.items.length} 场</span>
+                </header>
 
-              <div className="agenda-body">
-                {day.items.map((item) => {
-                  const accent =
-                    item.status === "completed"
-                      ? stageColor("hired")
-                      : item.status === "cancelled" || item.status === "no_show"
-                        ? "var(--ink-3)"
-                        : stageColor("interview");
-                  return (
-                    <article className={`agenda-row status-${item.status}`} key={item.id}>
-                      <div className="agenda-time">
-                        <strong>{fmtTime(item.scheduled_at)}</strong>
-                        <span>{item.duration_minutes} 分钟</span>
-                      </div>
-                      <div className="agenda-rail" aria-hidden>
-                        <span className="rail-dot" style={{ background: accent }} />
-                      </div>
-                      <div className="agenda-card">
-                        <div className="agenda-main">
-                          <div className="agenda-who">
-                            <Avatar name={item.candidate_name ?? "?"} size={28} />
-                            <div>
-                              {item.candidate_id ? <Link to={candidateLink(item.candidate_id, item.application_id, "interviews")}>{item.candidate_name ?? "候选人"}</Link> : <strong>{item.candidate_name ?? "候选人"}</strong>}
-                              <span className="muted">{interviewLabel(item)}</span>
+                <div className="agenda-body">
+                  {day.items.map((item) => {
+                    const accent =
+                      item.status === "completed"
+                        ? stageColor("hired")
+                        : item.status === "cancelled" || item.status === "no_show"
+                          ? "var(--ink-3)"
+                          : stageColor("interview");
+                    return (
+                      <article className={`agenda-row status-${item.status}`} key={item.id}>
+                        <div className="agenda-time">
+                          <strong>{fmtTime(item.scheduled_at)}</strong>
+                          <span>{item.duration_minutes} 分钟</span>
+                        </div>
+                        <div className="agenda-rail" aria-hidden>
+                          <span className="rail-dot" style={{ background: accent }} />
+                        </div>
+                        <div className="agenda-card">
+                          <div className="agenda-main">
+                            <div className="agenda-who">
+                              <Avatar name={item.candidate_name ?? "?"} size={28} />
+                              <div>
+                                {item.candidate_id ? <Link to={candidateLink(item.candidate_id, item.application_id, "interviews")}>{item.candidate_name ?? "候选人"}</Link> : <strong>{item.candidate_name ?? "候选人"}</strong>}
+                                <span className="muted">{interviewLabel(item)}</span>
+                              </div>
+                            </div>
+                            <div className="agenda-meta">
+                              {item.job_id && (
+                                <Link className="agenda-job" to={`/jobs/${item.job_id}/interviews`}>
+                                  {item.job_title ?? "职位"}
+                                </Link>
+                              )}
+                              <span className="inline-icon">
+                                <IconClock size={13} /> {meta.interviewModeLabels[item.mode] ?? item.mode}
+                              </span>
+                              {item.location && (
+                                <span className="inline-icon">
+                                  <IconMapPin size={13} /> {item.location}
+                                </span>
+                              )}
+                              {(() => {
+                                const link = item.status === "cancelled" ? null : safeMeetingUrl(item.meeting_url);
+                                return link ? (
+                                  <a className="inline-icon" href={link} target="_blank" rel="noreferrer">
+                                    <IconLink size={13} /> 会议链接
+                                  </a>
+                                ) : null;
+                              })()}
+                              <span className="muted">{item.interviewer_name ? `面试官 ${item.interviewer_name}` : "面试官待定"}</span>
                             </div>
                           </div>
-                          <div className="agenda-meta">
-                            {item.job_id && (
-                              <Link className="agenda-job" to={`/jobs/${item.job_id}/interviews`}>
-                                {item.job_title ?? "职位"}
-                              </Link>
-                            )}
-                            <span className="inline-icon">
-                              <IconClock size={13} /> {meta.interviewModeLabels[item.mode] ?? item.mode}
-                            </span>
-                            {item.location && (
-                              <span className="inline-icon">
-                                <IconMapPin size={13} /> {item.location}
-                              </span>
-                            )}
-                            {(() => {
-                              const link = item.status === "cancelled" ? null : safeMeetingUrl(item.meeting_url);
-                              return link ? (
-                                <a className="inline-icon" href={link} target="_blank" rel="noreferrer">
-                                  <IconLink size={13} /> 会议链接
-                                </a>
-                              ) : null;
-                            })()}
-                            <span className="muted">{item.interviewer_name ? `面试官 ${item.interviewer_name}` : "面试官待定"}</span>
-                          </div>
-                        </div>
 
-                        <div className="agenda-side">
-                          <div className="agenda-badges">
-                            <Badge tone={awaitingSummary(item) ? "warning" : item.status === "completed" ? "brand" : "neutral"}>
-                              {awaitingSummary(item) ? "待总结" : STATUS_LABEL[item.status]}
-                            </Badge>
-                            {(() => {
-                              const cal = calendarSyncBadge(item.calendar_sync_status);
-                              if (!cal) return null;
-                              const tip =
-                                item.calendar_sync_status === "failed" && item.calendar_sync_error
-                                  ? `失败原因：${item.calendar_sync_error}`
-                                  : item.calendar_synced_at
-                                    ? `同步于 ${fmtDateTime(item.calendar_synced_at)}`
-                                    : undefined;
-                              return (
-                                <span title={tip}>
-                                  <Badge tone={cal.tone}>{cal.label}</Badge>
-                                </span>
-                              );
-                            })()}
-                          </div>
-                          <div className="agenda-actions">
-                            <Button size="sm" variant={awaitingSummary(item) ? "primary" : undefined} onClick={() => setOpenedId(item.id)}>
-                              {awaitingSummary(item) && canWrite ? "整理面试" : "查看面试"}
-                            </Button>
-                            {canWrite && item.calendar_sync_status === "failed" && (
-                              <Button
-                                size="sm"
-                                loading={syncingId === item.id}
-                                disabled={syncingId !== null && syncingId !== item.id}
-                                onClick={() => void syncCalendar(item)}
-                              >
-                                重试同步日历
+                          <div className="agenda-side">
+                            <div className="agenda-badges">
+                              <Badge tone={awaitingSummary(item) ? "warning" : item.status === "completed" ? "brand" : "neutral"}>
+                                {awaitingSummary(item) ? "待总结" : STATUS_LABEL[item.status]}
+                              </Badge>
+                              {(() => {
+                                const cal = calendarSyncBadge(item.calendar_sync_status);
+                                if (!cal) return null;
+                                const tip =
+                                  item.calendar_sync_status === "failed" && item.calendar_sync_error
+                                    ? `失败原因：${item.calendar_sync_error}`
+                                    : item.calendar_synced_at
+                                      ? `同步于 ${fmtDateTime(item.calendar_synced_at)}`
+                                      : undefined;
+                                return (
+                                  <span title={tip}>
+                                    <Badge tone={cal.tone}>{cal.label}</Badge>
+                                  </span>
+                                );
+                              })()}
+                            </div>
+                            <div className="agenda-actions">
+                              <Button size="sm" variant={awaitingSummary(item) ? "primary" : undefined} onClick={() => setOpenedId(item.id)}>
+                                {awaitingSummary(item) && canWrite ? "整理面试" : "查看面试"}
                               </Button>
-                            )}
-                            {canWrite && item.status === "scheduled" && <>
-                              <Button size="sm" onClick={() => setRescheduling(item)}>改期</Button>
-                              <Button size="sm" onClick={() => void act(item, "no_show")}>未到场</Button>
-                              <Button size="sm" variant="ghost" onClick={() => void act(item, "cancel")}>取消</Button>
-                            </>}
+                              {canWrite && item.calendar_sync_status === "failed" && (
+                                <Button
+                                  size="sm"
+                                  loading={syncingId === item.id}
+                                  disabled={syncingId !== null && syncingId !== item.id}
+                                  onClick={() => void syncCalendar(item)}
+                                >
+                                  重试同步日历
+                                </Button>
+                              )}
+                              {canWrite && item.status === "scheduled" && <>
+                                <Button size="sm" onClick={() => setRescheduling(item)}>改期</Button>
+                                <Button size="sm" onClick={() => void act(item, "no_show")}>未到场</Button>
+                                <Button size="sm" variant="ghost" onClick={() => void act(item, "cancel")}>取消</Button>
+                              </>}
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    </article>
-                  );
-                })}
-              </div>
-            </section>
-          ))}
-        </div>
-      )}
+                      </article>
+                    );
+                  })}
+                </div>
+              </section>
+            ))}
+          </div>
+        )}
+      </TabPanels>
 
       {opened && <InterviewDrawer key={opened.id} interview={opened} rejectionReasons={meta.rejectionReasons} canWrite={canWrite && opened.status === "scheduled"} onClose={() => { setOpenedId(null); load(); }} onChange={load} />}
       <RescheduleModal

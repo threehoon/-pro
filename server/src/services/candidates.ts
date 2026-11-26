@@ -51,6 +51,41 @@ export interface CandidateInput {
   owner_id?: string | null;
 }
 
+/** 候选人库的分组维度：与前端 workflowStage() 的「流程」列一一对应。 */
+export const CANDIDATE_GROUPS = [
+  'screening',
+  'interview',
+  'negotiation',
+  'pending',
+  'hired',
+  'rejected',
+  'none',
+] as const;
+export type CandidateGroup = (typeof CANDIDATE_GROUPS)[number];
+
+export function isCandidateGroup(value: unknown): value is CandidateGroup {
+  return typeof value === 'string' && (CANDIDATE_GROUPS as readonly string[]).includes(value);
+}
+
+// 同一候选人可能有多条投递：取「最靠后的活跃投递」决定他落在哪一组。
+// 权重与前端 STAGE_WEIGHT 一致；同阶段再用 updated_at 取最近一条，最后用 id 兜底，
+// 保证 stage 与 offer_status 两个子查询在 updated_at 相同时仍指向同一条投递。
+const FURTHEST_STAGE_ORDER = `CASE a.stage
+      WHEN 'hired' THEN 5 WHEN 'offer' THEN 4 WHEN 'interview' THEN 3
+      WHEN 'screening' THEN 2 ELSE 1 END DESC, a.updated_at DESC, a.id DESC`;
+
+// new 与 screening 都显示为「待筛选」；offer 已发出/已接受归「待入职」，其余 offer 归「谈薪」。
+const GROUP_KEY_SQL = `CASE
+      WHEN t.active_count = 0 AND t.rejected_count > 0 THEN 'rejected'
+      WHEN t.active_count = 0 THEN 'none'
+      WHEN t.furthest_stage IN ('new', 'screening') THEN 'screening'
+      WHEN t.furthest_stage = 'interview' THEN 'interview'
+      WHEN t.furthest_stage = 'offer' AND t.furthest_offer_status IN ('sent', 'accepted') THEN 'pending'
+      WHEN t.furthest_stage = 'offer' THEN 'negotiation'
+      WHEN t.furthest_stage = 'hired' THEN 'hired'
+      ELSE 'none'
+    END`;
+
 export function serializeCandidate(row: CandidateRow & Record<string, unknown>) {
   const { resume_text: _resumeText, ...display } = row;
   const parsed = jsonParse<Record<string, unknown> | null>(row.parsed, null);
@@ -67,11 +102,19 @@ export function listCandidates(options: {
   q?: string;
   skill?: string;
   tag?: string;
+  jobId?: string;
+  group?: string;
   page?: number;
   pageSize?: number;
 } = {}) {
   const conditions: string[] = [];
   const params: unknown[] = [];
+  const jobId = options.jobId;
+  const applicationSource = jobId ? 'job_applications' : 'applications';
+  const scope = jobId
+    ? 'WITH job_applications AS NOT MATERIALIZED (SELECT * FROM applications WHERE job_id = ?)'
+    : '';
+  if (jobId) params.push(jobId);
   if (options.q?.trim()) {
     const like = `%${options.q.trim()}%`;
     conditions.push(
@@ -91,31 +134,59 @@ export function listCandidates(options: {
   const page = Math.max(1, options.page ?? 1);
   const pageSize = Math.min(100, Math.max(1, options.pageSize ?? 20));
 
-  const total =
-    getRow<{ n: number }>(`SELECT COUNT(*) AS n FROM candidates c ${where}`, params)?.n ?? 0;
+  // 选定职位后，候选人必须有该职位的投递，流程也只由该职位的投递决定。
+  // 不加职位时，仍取候选人的全局最远阶段。
+  const jobJoin = jobId ? 'JOIN job_applications selected ON selected.candidate_id = c.id' : '';
+  const base = `SELECT c.*, u.name AS owner_name,
+            (SELECT COUNT(*) FROM ${applicationSource} a WHERE a.candidate_id = c.id AND a.status = 'active') AS active_count,
+            (SELECT COUNT(*) FROM ${applicationSource} a WHERE a.candidate_id = c.id AND a.status = 'rejected') AS rejected_count,
+            (SELECT a.stage FROM ${applicationSource} a
+              WHERE a.candidate_id = c.id AND a.status = 'active'
+              ORDER BY ${FURTHEST_STAGE_ORDER}
+              LIMIT 1) AS furthest_stage,
+            (SELECT o.status FROM ${applicationSource} a LEFT JOIN offers o ON o.application_id = a.id
+              WHERE a.candidate_id = c.id AND a.status = 'active'
+              ORDER BY ${FURTHEST_STAGE_ORDER}
+              LIMIT 1) AS furthest_offer_status
+     FROM candidates c ${jobJoin} LEFT JOIN users u ON u.id = c.owner_id
+     ${where}`;
+
+  const counts = all<{ g: string; n: number }>(
+    `${scope} SELECT ${GROUP_KEY_SQL} AS g, COUNT(*) AS n FROM (${base}) t GROUP BY g`,
+    params,
+  );
+  const groupCounts = Object.fromEntries(CANDIDATE_GROUPS.map((key) => [key, 0])) as Record<CandidateGroup, number>;
+  for (const row of counts) {
+    if (isCandidateGroup(row.g)) groupCounts[row.g] = Number(row.n);
+  }
+  const allTotal = CANDIDATE_GROUPS.reduce((sum, key) => sum + groupCounts[key], 0);
+
+  const group = isCandidateGroup(options.group) ? options.group : null;
+  const total = group ? groupCounts[group] : allTotal;
 
   const items = all<Record<string, unknown>>(
-    `SELECT c.*, u.name AS owner_name,
-            (SELECT COUNT(*) FROM applications a WHERE a.candidate_id = c.id AND a.status = 'active') AS active_count,
-            (SELECT COUNT(*) FROM applications a WHERE a.candidate_id = c.id AND a.status = 'rejected') AS rejected_count,
-            (SELECT a.stage FROM applications a
-              WHERE a.candidate_id = c.id AND a.status = 'active'
-              ORDER BY CASE a.stage WHEN 'hired' THEN 5 WHEN 'offer' THEN 4 WHEN 'interview' THEN 3
-                                    WHEN 'screening' THEN 2 ELSE 1 END DESC
-              LIMIT 1) AS furthest_stage
-     FROM candidates c LEFT JOIN users u ON u.id = c.owner_id
-     ${where}
-     ORDER BY c.updated_at DESC
+    `${scope} SELECT t.* FROM (${base}) t
+     ${group ? `WHERE ${GROUP_KEY_SQL} = ?` : ''}
+     ORDER BY t.updated_at DESC, t.id DESC
      LIMIT ? OFFSET ?`,
-    [...params, pageSize, (page - 1) * pageSize],
+    group ? [...params, group, pageSize, (page - 1) * pageSize] : [...params, pageSize, (page - 1) * pageSize],
   ).map((row) => ({
     ...serializeCandidate(row as CandidateRow & Record<string, unknown>),
     active_count: Number(row.active_count ?? 0),
     rejected_count: Number(row.rejected_count ?? 0),
     furthest_stage: (row.furthest_stage as string | null) ?? null,
+    furthest_offer_status: (row.furthest_offer_status as string | null) ?? null,
   }));
 
-  return { items, total, page, pageSize, pages: Math.max(1, Math.ceil(total / pageSize)) };
+  return {
+    items,
+    total,
+    page,
+    pageSize,
+    pages: Math.max(1, Math.ceil(total / pageSize)),
+    group: group ?? '',
+    groupCounts: { all: allTotal, ...groupCounts },
+  };
 }
 
 export function getCandidate(candidateId: string) {

@@ -401,6 +401,360 @@ test('注册在初始化后仅限管理员，且成员不能改飞书或删除�
   assert.equal(unknown.statusCode, 404);
 });
 
+test('候选人按流程阶段分组，计数与筛选结果一致', async (t) => {
+  const baseline = (
+    await app.inject({ method: 'GET', url: '/api/candidates?pageSize=100', headers: authHeaders() })
+  ).json();
+  const groups = ['screening', 'interview', 'negotiation', 'pending', 'hired', 'rejected', 'none'] as const;
+
+  const job = await app.inject({
+    method: 'POST',
+    url: '/api/jobs',
+    headers: authHeaders(),
+    payload: { title: '分组测试职位', headcount: 1 },
+  });
+  assert.equal(job.statusCode, 201);
+  const jobId = job.json().job.id;
+
+  const create = async (label: string, key: string, extra: Record<string, unknown> = {}) => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/candidates',
+      headers: authHeaders(),
+      payload: { name: `分组样本-${label}`, email: `group-${key}@example.com`, ...extra },
+    });
+    assert.equal(res.statusCode, 201, res.body);
+    return res.json().candidate.id as string;
+  };
+  const apply = async (candidateId: string, targetJobId = jobId) => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/applications',
+      headers: authHeaders(),
+      payload: { jobId: targetJobId, candidateId },
+    });
+    assert.equal(res.statusCode, 201, res.body);
+    return res.json().application.id as string;
+  };
+
+  // 七个分类各造样本：待入职用 sent 与 accepted 两位，避免状态分支写错也能蒙混过关
+  const ids: Record<(typeof groups)[number] | 'pendingAccepted', string> = {
+    screening: await create('待筛选', 'screening', { skills: ['Go'] }),
+    interview: await create('面试中', 'interview'),
+    negotiation: await create('谈薪', 'negotiation'),
+    pending: await create('待入职已发', 'pending-sent'),
+    pendingAccepted: await create('待入职已接受', 'pending-accepted'),
+    hired: await create('已入职', 'hired'),
+    rejected: await create('已拒绝', 'rejected'),
+    none: await create('未投递', 'none', { skills: ['Go'] }),
+  };
+  const noneNoSkill = await create('未投递二号', 'none-python', { skills: ['Python'] });
+
+  const screeningApp = await apply(ids.screening);
+  const interviewApp = await apply(ids.interview);
+  const negotiationApp = await apply(ids.negotiation);
+  const pendingApp = await apply(ids.pending);
+  const pendingAcceptedApp = await apply(ids.pendingAccepted);
+  const hiredApp = await apply(ids.hired);
+  const rejectedApp = await apply(ids.rejected);
+
+  const now = new Date().toISOString();
+  // 待筛选样本压回 new：覆盖「new 也归待筛选」，否则只测到 screening 分支
+  run("UPDATE applications SET stage = 'new' WHERE id = ?", [screeningApp]);
+  run("UPDATE applications SET stage = 'interview' WHERE id = ?", [interviewApp]);
+  run("UPDATE applications SET stage = 'offer' WHERE id = ?", [negotiationApp]);
+  run("UPDATE applications SET stage = 'offer' WHERE id = ?", [pendingApp]);
+  run("UPDATE applications SET stage = 'offer' WHERE id = ?", [pendingAcceptedApp]);
+  run("UPDATE applications SET stage = 'hired' WHERE id = ?", [hiredApp]);
+  run("UPDATE applications SET status = 'rejected', rejection_reason = '其他', rejected_at = ? WHERE id = ?", [
+    now,
+    rejectedApp,
+  ]);
+  const offer = (applicationId: string, status: string) =>
+    run(
+      'INSERT INTO offers (id, application_id, status, created_at, updated_at, sent_at) VALUES (?, ?, ?, ?, ?, ?)',
+      [`offer_${applicationId}`, applicationId, status, now, now, status === 'negotiating' ? null : now],
+    );
+  offer(negotiationApp, 'negotiating');
+  offer(pendingApp, 'sent');
+  offer(pendingAcceptedApp, 'accepted');
+  const screeningRow = getRow<{ stage: string }>('SELECT stage FROM applications WHERE id = ?', [screeningApp]);
+  assert.equal(screeningRow?.stage, 'new');
+
+  const all = (
+    await app.inject({ method: 'GET', url: '/api/candidates?pageSize=100', headers: authHeaders() })
+  ).json();
+
+  // 独立口径：分类总数必须等于候选人表实际行数，而不是由同一份推导自证
+  const stored = getRow<{ n: number }>('SELECT COUNT(*) AS n FROM candidates');
+  assert.equal(all.groupCounts.all, Number(stored?.n ?? 0));
+
+  const deltas: Record<(typeof groups)[number], number> = {
+    screening: 1,
+    interview: 1,
+    negotiation: 1,
+    pending: 2,
+    hired: 1,
+    rejected: 1,
+    none: 2,
+  };
+  for (const key of groups) {
+    assert.equal(
+      all.groupCounts[key],
+      Number(baseline.groupCounts[key] ?? 0) + deltas[key],
+      `${key} 计数偏了：期望在原有基础上 +${deltas[key]}`,
+    );
+  }
+
+  const expected: Record<(typeof groups)[number], string[]> = {
+    screening: [ids.screening],
+    interview: [ids.interview],
+    negotiation: [ids.negotiation],
+    pending: [ids.pending, ids.pendingAccepted],
+    hired: [ids.hired],
+    rejected: [ids.rejected],
+    none: [ids.none, noneNoSkill],
+  };
+
+  for (const key of groups) {
+    const res = (
+      await app.inject({ method: 'GET', url: `/api/candidates?group=${key}&pageSize=100`, headers: authHeaders() })
+    ).json();
+    assert.equal(res.group, key);
+    assert.equal(res.total, all.groupCounts[key], `${key} 的 total 与计数不一致`);
+    const got = res.items.map((item: { id: string }) => item.id);
+    for (const id of expected[key]) assert.ok(got.includes(id), `${key} 分类里缺少 ${id}`);
+    // 只在「自己的分类里出现」：某个分支写错会把样本串到别的分类，这条断言会失败
+    for (const other of groups) {
+      if (other === key) continue;
+      for (const id of expected[other]) {
+        assert.equal(got.includes(id), false, `${key} 分类不该包含 ${other} 分类的 ${id}`);
+      }
+    }
+  }
+
+  // 待入职：只有 sent / accepted 算，negotiating 必须留在谈薪
+  const pending = (
+    await app.inject({ method: 'GET', url: '/api/candidates?group=pending&pageSize=100', headers: authHeaders() })
+  ).json();
+  assert.ok(
+    pending.items.every((item: { furthest_stage: string; furthest_offer_status: string }) =>
+      item.furthest_stage === 'offer' && ['sent', 'accepted'].includes(item.furthest_offer_status),
+    ),
+  );
+  const negotiation = (
+    await app.inject({ method: 'GET', url: '/api/candidates?group=negotiation&pageSize=100', headers: authHeaders() })
+  ).json();
+  assert.ok(
+    negotiation.items.every((item: { furthest_stage: string; furthest_offer_status: string }) =>
+      item.furthest_stage === 'offer' && item.furthest_offer_status === 'negotiating',
+    ),
+  );
+
+  // 分页与分类叠加：pages 由分类内的 total 决定，不能拿全库总数算
+  const paged = (
+    await app.inject({ method: 'GET', url: '/api/candidates?group=pending&pageSize=1', headers: authHeaders() })
+  ).json();
+  assert.ok(paged.total >= 2);
+  assert.equal(paged.items.length, 1);
+  assert.equal(paged.pages, paged.total);
+  const paged2 = (
+    await app.inject({
+      method: 'GET',
+      url: '/api/candidates?group=pending&pageSize=1&page=2',
+      headers: authHeaders(),
+    })
+  ).json();
+  assert.equal(paged2.items.length, 1);
+  assert.notEqual(paged2.items[0].id, paged.items[0].id);
+
+  // 搜索 + 技能 + 分类三者叠加：关键词只命中两位，加上技能才收敛到一位，
+  // 因此「skill 被忽略」或「分类栏人数不跟筛选走」都会让下面的断言失败
+  const q = encodeURIComponent('分组样本-未投递');
+  const keywordOnly = (
+    await app.inject({
+      method: 'GET',
+      url: `/api/candidates?group=none&q=${q}&pageSize=100`,
+      headers: authHeaders(),
+    })
+  ).json();
+  assert.equal(keywordOnly.total, 2);
+  assert.equal(keywordOnly.groupCounts.none, 2);
+  assert.equal(keywordOnly.groupCounts.all, 2);
+
+  const filtered = (
+    await app.inject({
+      method: 'GET',
+      url: `/api/candidates?group=none&q=${q}&skill=Go`,
+      headers: authHeaders(),
+    })
+  ).json();
+  assert.equal(filtered.group, 'none');
+  assert.equal(filtered.total, 1);
+  assert.equal(filtered.items.length, 1);
+  assert.equal(filtered.items[0].id, ids.none);
+  assert.equal(filtered.groupCounts.none, 1);
+  assert.equal(filtered.groupCounts.all, 1);
+
+  // 同一候选人多条投递：取最靠后的那条（已入职优先于后加的新投递）
+  const secondJob = await app.inject({
+    method: 'POST',
+    url: '/api/jobs',
+    headers: authHeaders(),
+    payload: { title: '分组测试职位二', headcount: 1 },
+  });
+  assert.equal(secondJob.statusCode, 201);
+  await apply(ids.hired, secondJob.json().job.id);
+  const afterSecond = (
+    await app.inject({ method: 'GET', url: '/api/candidates?pageSize=100', headers: authHeaders() })
+  ).json();
+  assert.equal(afterSecond.groupCounts.hired, all.groupCounts.hired);
+  assert.equal(afterSecond.groupCounts.screening, all.groupCounts.screening);
+  const hiredItems = (
+    await app.inject({ method: 'GET', url: '/api/candidates?group=hired&pageSize=100', headers: authHeaders() })
+  ).json();
+  assert.ok(hiredItems.items.some((item: { id: string }) => item.id === ids.hired));
+  const screeningItems = (
+    await app.inject({ method: 'GET', url: '/api/candidates?group=screening&pageSize=100', headers: authHeaders() })
+  ).json();
+  assert.equal(
+    screeningItems.items.some((item: { id: string }) => item.id === ids.hired),
+    false,
+    '已入职候选人不该因为后加的新投递落回待筛选',
+  );
+
+  // 未知分组退化成「全部」，不报错
+  const bogus = (
+    await app.inject({ method: 'GET', url: '/api/candidates?group=bogus&pageSize=100', headers: authHeaders() })
+  ).json();
+  assert.equal(bogus.group, '');
+  assert.equal(bogus.total, all.total);
+  assert.equal(bogus.groupCounts.all, all.groupCounts.all);
+
+  const secondJobId: string = secondJob.json().job.id;
+  const secondRejectedApp = await apply(ids.rejected, secondJobId);
+  run("UPDATE applications SET stage = 'interview' WHERE id = ?", [secondRejectedApp]);
+  const secondNegotiationApp = await apply(ids.negotiation, secondJobId);
+  run("UPDATE applications SET stage = 'offer' WHERE id = ?", [secondNegotiationApp]);
+  offer(secondNegotiationApp, 'sent');
+  const secondOnly = await create('待入职其他职位', 'other-job-pending', { skills: ['Go'] });
+  const secondOnlyApp = await apply(secondOnly, secondJobId);
+  run("UPDATE applications SET stage = 'offer' WHERE id = ?", [secondOnlyApp]);
+  offer(secondOnlyApp, 'sent');
+
+  const list = async (params: Record<string, string>) => {
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/candidates?${new URLSearchParams(params)}`,
+      headers: authHeaders(),
+    });
+    assert.equal(res.statusCode, 200, res.body);
+    return res.json<{
+      items: {
+        id: string;
+        active_count: number;
+        rejected_count: number;
+        furthest_stage: string | null;
+        furthest_offer_status: string | null;
+      }[];
+      total: number;
+      page: number;
+      pages: number;
+      group: string;
+      groupCounts: Record<(typeof groups)[number] | 'all', number>;
+    }>();
+  };
+
+  await t.test('按实际投递职位返回候选人，以及该职位专属流程状态和计数', async () => {
+    const selected = await list({ jobId });
+    assert.equal(selected.total, 7);
+    assert.deepEqual(selected.groupCounts, { all: 7, ...deltas, none: 0 });
+    assert.deepEqual(
+      selected.items.map(({ id }) => id).sort(),
+      [ids.screening, ids.interview, ids.negotiation, ids.pending, ids.pendingAccepted, ids.hired, ids.rejected].sort(),
+    );
+
+    const rejected = await list({ jobId, group: 'rejected' });
+    assert.equal(rejected.total, 1);
+    assert.deepEqual(rejected.items.map((item) => item.id), [ids.rejected]);
+    assert.equal(rejected.items[0]?.active_count, 0);
+    assert.equal(rejected.items[0]?.rejected_count, 1);
+    assert.equal(rejected.items[0]?.furthest_stage, null);
+    assert.equal(rejected.items[0]?.furthest_offer_status, null);
+
+    const other = await list({ jobId: secondJobId });
+    assert.deepEqual(other.groupCounts, {
+      all: 4, screening: 1, interview: 1, negotiation: 0, pending: 2, hired: 0, rejected: 0, none: 0,
+    });
+    const otherItems = new Map(other.items.map((item) => [item.id, item]));
+    assert.equal(otherItems.get(ids.hired)?.furthest_stage, 'screening');
+    assert.equal(otherItems.get(ids.rejected)?.furthest_stage, 'interview');
+    assert.equal(otherItems.get(ids.rejected)?.rejected_count, 0);
+    assert.equal(otherItems.get(ids.negotiation)?.furthest_offer_status, 'sent');
+    assert.equal(otherItems.get(ids.negotiation)?.active_count, 1);
+    assert.equal(selected.items.find((item) => item.id === ids.negotiation)?.furthest_offer_status, 'negotiating');
+  });
+
+  await t.test('职位、关键词、分类和分页叠加，切回全部职位恢复全局口径', async () => {
+    const query = { jobId, q: '分组样本-待', group: 'pending', pageSize: '1' };
+    const first = await list(query);
+    const second = await list({ ...query, page: '2' });
+    for (const page of [first, second]) {
+      assert.equal(page.group, 'pending');
+      assert.equal(page.total, 2);
+      assert.equal(page.pages, 2);
+      assert.deepEqual(page.groupCounts, {
+        all: 3, screening: 1, interview: 0, negotiation: 0, pending: 2, hired: 0, rejected: 0, none: 0,
+      });
+      assert.equal(page.items.length, 1);
+    }
+    assert.equal(first.page, 1);
+    assert.equal(second.page, 2);
+    assert.deepEqual(
+      [...first.items, ...second.items].map(({ id }) => id).sort(),
+      [ids.pending, ids.pendingAccepted].sort(),
+    );
+
+    const globalPending = await list({ q: query.q, group: 'pending' });
+    assert.equal(globalPending.total, 3);
+    assert.equal(globalPending.groupCounts.all, 4);
+    assert.ok(globalPending.items.some((item) => item.id === secondOnly));
+    const global = await list({ q: '分组样本-' });
+    assert.equal(global.groupCounts.hired, 1);
+    assert.equal(global.groupCounts.rejected, 0);
+    assert.equal(global.items.find((item) => item.id === ids.hired)?.active_count, 2);
+    assert.equal(global.items.find((item) => item.id === ids.rejected)?.rejected_count, 1);
+    assert.equal(global.items.find((item) => item.id === ids.rejected)?.furthest_stage, 'interview');
+  });
+
+  await t.test('无投递或不存在的职位返回空列表，重复 jobId 返回 400', async () => {
+    const emptyJob = await app.inject({
+      method: 'POST',
+      url: '/api/jobs',
+      headers: authHeaders(),
+      payload: { title: '分组测试空职位', headcount: 1 },
+    });
+    assert.equal(emptyJob.statusCode, 201, emptyJob.body);
+    const emptyJobId: string = emptyJob.json().job.id;
+    for (const unknownOrEmptyId of [emptyJobId, 'job_missing_for_candidate_filter']) {
+      const selection = await list({ jobId: unknownOrEmptyId, group: 'screening' });
+      assert.deepEqual(selection.items, []);
+      assert.equal(selection.total, 0);
+      assert.equal(selection.pages, 1);
+      assert.deepEqual(selection.groupCounts, {
+        all: 0, screening: 0, interview: 0, negotiation: 0, pending: 0, hired: 0, rejected: 0, none: 0,
+      });
+    }
+    assert.deepEqual(await list({ jobId: ' ', q: '分组样本-' }), await list({ q: '分组样本-' }));
+    const duplicated = await app.inject({
+      method: 'GET',
+      url: `/api/candidates?jobId=${jobId}&jobId=${secondJobId}`,
+      headers: authHeaders(),
+    });
+    assert.equal(duplicated.statusCode, 400, duplicated.body);
+  });
+});
+
 test('简历下载强制附件，不按客户端声明回放 HTML', async () => {
   const boundary = '----hireloop-test';
   const body = Buffer.concat([

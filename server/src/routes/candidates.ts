@@ -37,11 +37,22 @@ const candidateSchema = z.object({
 export async function candidateRoutes(app: FastifyInstance) {
   app.get('/api/candidates', async (request) => {
     requireUser(request);
-    const query = request.query as { q?: string; skill?: string; tag?: string; page?: string; pageSize?: string };
+    const query = request.query as {
+      q?: string;
+      skill?: string;
+      tag?: string;
+      jobId?: unknown;
+      group?: string;
+      page?: string;
+      pageSize?: string;
+    };
+    if (query.jobId !== undefined && typeof query.jobId !== 'string') throw badRequest('请选择一个职位');
     return listCandidates({
       q: query.q,
       skill: query.skill,
       tag: query.tag,
+      jobId: query.jobId?.trim(),
+      group: query.group,
       page: query.page ? Number(query.page) : undefined,
       pageSize: query.pageSize ? Number(query.pageSize) : undefined,
     });

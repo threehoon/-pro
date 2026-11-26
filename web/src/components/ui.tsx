@@ -10,6 +10,7 @@ import {
   type ButtonHTMLAttributes,
   type InputHTMLAttributes,
   type ReactNode,
+  type Ref,
   type SelectHTMLAttributes,
   type TextareaHTMLAttributes,
 } from "react";
@@ -119,16 +120,19 @@ export function SearchInput({
   value,
   onChange,
   placeholder = "搜索",
+  inputRef,
 }: {
   value: string;
   onChange: (value: string) => void;
   placeholder?: string;
+  inputRef?: Ref<HTMLInputElement>;
 }) {
   return (
     <div className="search-input">
       <IconSearch size={16} />
       <input
         className="input"
+        ref={inputRef}
         value={value}
         placeholder={placeholder}
         onChange={(event) => onChange(event.target.value)}
@@ -563,23 +567,65 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
 
 /* ----------------------------------- Tabs ---------------------------------- */
 
+function tabId(idBase: string, value: string) {
+  return `${idBase}-tab-${value}`;
+}
+
+function tabPanelId(idBase: string, value: string) {
+  return `${idBase}-panel-${value}`;
+}
+
 export function Tabs({
+  idBase,
   tabs,
   value,
   onChange,
+  label,
 }: {
-  tabs: Array<{ value: string; label: ReactNode; count?: number }>;
+  idBase: string;
+  tabs: ReadonlyArray<{ value: string; label: ReactNode; count?: number }>;
   value: string;
   onChange: (value: string) => void;
+  label: string;
 }) {
+  const activeIndex = Math.max(
+    0,
+    tabs.findIndex((tab) => tab.value === value),
+  );
+
+  // tablist 的键盘约定：Tab 键只停在当前项，左右方向键切换，Home/End 到首尾。
+  // 上下方向键不接管，留给页面滚动。
+  const select = (index: number) => {
+    const next = tabs[(index + tabs.length) % tabs.length];
+    if (!next || next.value === value) return;
+    document.getElementById(tabId(idBase, next.value))?.focus();
+    onChange(next.value);
+  };
+
   return (
-    <div className="tabs" role="tablist">
-      {tabs.map((tab) => (
+    <div
+      className="tabs"
+      role="tablist"
+      aria-label={label}
+      onKeyDown={(event) => {
+        if (event.altKey || event.metaKey || event.ctrlKey) return;
+        if (event.key === "ArrowRight") select(activeIndex + 1);
+        else if (event.key === "ArrowLeft") select(activeIndex - 1);
+        else if (event.key === "Home") select(0);
+        else if (event.key === "End") select(tabs.length - 1);
+        else return;
+        event.preventDefault();
+      }}
+    >
+      {tabs.map((tab, index) => (
         <button
           key={tab.value}
           type="button"
           role="tab"
+          id={tabId(idBase, tab.value)}
+          aria-controls={tabPanelId(idBase, tab.value)}
           aria-selected={value === tab.value}
+          tabIndex={index === activeIndex ? 0 : -1}
           className={`tab ${value === tab.value ? "active" : ""}`}
           onClick={() => onChange(tab.value)}
         >
@@ -589,4 +635,40 @@ export function Tabs({
       ))}
     </div>
   );
+}
+
+export function TabPanels({
+  idBase,
+  tabs,
+  value,
+  busy,
+  activeRef,
+  children,
+}: {
+  idBase: string;
+  tabs: ReadonlyArray<{ value: string }>;
+  value: string;
+  busy: boolean;
+  activeRef?: Ref<HTMLDivElement>;
+  children: ReactNode;
+}) {
+  // 保留所有面板的 ID，只渲染选中面板的内容。
+  return tabs.map((tab) => {
+    const active = tab.value === value;
+    return (
+      <div
+        key={tab.value}
+        id={tabPanelId(idBase, tab.value)}
+        role="tabpanel"
+        className="tab-panel"
+        ref={active ? activeRef : undefined}
+        aria-labelledby={tabId(idBase, tab.value)}
+        aria-busy={active ? busy : undefined}
+        hidden={!active}
+        tabIndex={active ? 0 : undefined}
+      >
+        {active ? children : null}
+      </div>
+    );
+  });
 }

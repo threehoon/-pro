@@ -9,13 +9,13 @@
 | --- | --- |
 | `DESIGN.md` | `092eeaab86b5c41c` |
 | `web/src/styles/tokens.css` | `8ea15d5de4e1397c` |
-| `web/src/styles/app.css` | `8e3a4b58771caa3f` |
+| `web/src/styles/app.css` | `d76b1b575351bc5b` |
 
 表面类型：**operate**。主题：暖纸底 + 深青墨水，签名手法「流动带」（看板列头阶段色带 / 职位头部按人数成比例的阶段轨道 / 面试时间刻度轴）。
 
 ## 2. 实现版本
 
-- 构建产物：`web/dist/assets/index-DFCr7nLj.js`（326.48 kB，gzip 98.96 kB）、`web/dist/assets/index-MJAkZvAh.css`（50.87 kB）
+- 构建产物：`web/dist/assets/index-BcKp_FxP.js`（411.71 kB，gzip 126.25 kB）、`web/dist/assets/index-DslrMm0o.css`（73.66 kB，gzip 13.16 kB）
 - 服务端：Node 原生 TypeScript 类型擦除 + `node:sqlite` + Fastify 5，无编译步骤
 - 数据：`npm run db:reset && npm run seed` 后为 5 个职位 / 15 位候选人 / 15 条投递 / 6 场面试（含 3 场已完成的反馈）
 
@@ -38,16 +38,16 @@
 | 检查 | 命令 | 结果 |
 | --- | --- | --- |
 | 类型检查（服务端 + 前端） | `npm run check` | 通过，exit 0 |
-| 后端测试 | `npm test` | 27/27 通过（530 ms） |
-| 生产构建 | `npm run build` | 通过（44 modules，356 ms） |
-| 交互冒烟（真实浏览器） | `npm run smoke` | 12/12 通过，无控制台错误 |
-| 权限冒烟（真实浏览器） | `npm run smoke:permissions` | 9/9 通过 |
+| 后端测试 | `npm test` | 62/62 通过（含候选人分组用例） |
+| 生产构建 | `npm run build` | 通过（56 modules，387 ms） |
+| 交互冒烟（真实浏览器） | `npm run smoke` | 80/80 通过，无控制台错误 |
+| 权限冒烟（真实浏览器） | `npm run smoke:permissions` | 9/9 通过（第 17 节记录，本轮未改动权限路径） |
 | 响应式溢出测量 | `node scripts/measure.mjs --width 390 --width 768 --width 1024 --width 1200 --width 1440` | 40/40 页面 `scrollWidth === clientWidth` |
 | 头部状态流转（真实浏览器） | `npm run smoke:heading` | 11/11 通过 |
 
-当前实现通过 `coding_check`（scope=changed）的 typecheck、build 和 test。非 Git 工作区无法提供变更清单，三项全部执行，自动 sweep 同样返回 `changed-list-unavailable`。手动核对了当前改动的导入、状态分支和重复判断。
+上表数字为本轮（第 19 节）实跑结果。本轮平台内置 `coding_check`（scope=changed 与 check=typecheck 两种调用）均返回 `Error: The coding operation could not be completed`（沿用第 16–18 节同一既有故障），因此上表不是平台自动验收证据，而是本地命令的 stdout 与 exit code；改动清单由 `git status`/`git diff`（工作区已在提交 `444758a` 之上）人工核对。
 
-注意：`coding_inspect acceptance` 仍判 `ready: false`，原因是每次运行的 `fresh` 都被标为 `source-incomplete` —— 这个工作区不是 git 仓库，而且项目内为了绕开 `~/.npm` 权限问题放了 `.npm-cache`（961 个文件 / 66 MB），检查器把它算进源码快照后无法生成完整指纹。检查本身全部实际执行并通过（上面的 stdout 与 exit 0 是真实结果），但按它的口径不能称"验收新鲜"。
+注意：`coding_inspect acceptance` 仍判 `ready: false`。工作区是 git 仓库（基线提交 `444758a`），本轮改动全部留在工作树、尚未提交，因此历史检查运行被标为 `fresh: false`（`git-revision-changed` / `source-incomplete`），四条准则全部 `missingChecks`。同时项目内为绕开 `~/.npm` 权限问题放了 `.npm-cache`（961 个文件 / 66 MB），检查器把它算进源码快照也会影响完整性。上表的 stdout 与 exit 0 是本轮真实执行结果，但按平台口径不能称「验收新鲜」，需要提交后再跑一次才会转为新鲜证据。
 
 ## 4. 交互流程实测（浏览器，非接口脚本）
 
@@ -283,3 +283,81 @@
   - **测试有效性（变异验证）**：把 `server/src/services/interviews.ts:533` 的 `canClearRecreateFlag` 临时改为 `false` 后，`npm run test` 变为 60/61、失败用例正是「清空地点后重建失败，现场编辑不丢重建意图，重试仍删旧建新」；还原后复跑 61/61。证明该用例能真正证伪错误实现，而不是依赖既有状态假通过。
   - **终审结论**：独立评审 `reviewer-stage3d` 先后指出 R1（响应丢失重复建）与 T1/T2/T3（测试缺口），本轮补齐 193001 正例、现场填回地点清标记用例、时长编辑失败态与无新建断言，并明确记录 R1 为残余风险；其最终结论为「F1–F4、T1、T2、T3 均已闭环，唯一保留的是已记录的 R1 残余，可以交付」。
   - 平台内置 `coding_check` 在本工作区仍返回 `Error: The coding operation could not be completed`（沿用第 16、17 节记录的既有故障），因此自动验收 `ready` 仍为 `false`，本轮交付证据以本地实跑命令、变异验证、隔离浏览器验证与独立评审为准。
+
+## 19. 候选人按流程阶段分类（含独立评审修复）
+
+2026-11-27 在 `http://127.0.0.1:8790`（`PORT=8790 npm start`，生产构建 `index-C6b_IcNF.js` / `index-DslrMm0o.css`）与隔离 Chrome（`--headless`，DPR 2/3）验证。基线提交 `444758a`。用户反馈：候选人全挤在一张平铺表里，没有分类，每次都得一行行找。
+
+- **交付范围**：
+  - 服务端 `GET /api/candidates` 增加 `group` 参数与 `groupCounts`：分类口径 = 候选人「在流程中最靠后的那条投递」，与服务端 `FURTHEST_STAGE_ORDER` 和前端 `workflowStage()` 对齐，七类为 `screening`（待筛选，含 `new`）、`interview`、`negotiation`（offer 但 `negotiating`）、`pending`（offer 且 `sent`/`accepted`）、`hired`、`rejected`（无在流程投递但有被拒记录）、`none`（从未投递）。
+  - `groupCounts` 按当前 `q`/`skill`/`tag` 统计，因此分类人数始终等于叠加筛选后的真实条数；`pages` 与 `total` 只统计所选分类，`group` 与 `q`/`skill` 可叠加；未知 `group` 退化为「全部」而不是报 400。
+  - 前端 `web/src/pages/CandidatesPage.tsx` 在搜索行上方加入分类 Tabs（全部 + 七类，各带人数），分类栏在有数据、已选分类或有关键词/技能筛选时保留，避免零命中时分类入口消失。
+  - 行内「流程」徽标改由 `candidateStageBadge()` 走同一个 `workflowStage({ stage, offer_status })`，修掉了此前「已发 offer 但未答复」显示成「谈薪」的不一致；列表主投递排序与服务端一致补 `id` 兜底。
+  - 共享 `web/src/components/ui.tsx` 的 `Tabs` 升级为 roving tabindex + 左右/Home/End 键，并支持 `label` 传入 `aria-label`；上下方向键不接管，留给页面滚动。职位页、面试页共用这一组件。
+  - `web/src/styles/app.css`：`.group-tabs .tabs { max-width: 100%; flex-wrap: wrap }`，任何宽度下分类不会被横向滚动藏起来；<700px 时 tab 等宽铺满、自然换行成两行。
+- **已知边界**：`FURTHEST_STAGE_ORDER` 在同权重同 `updated_at` 时按 `a.id DESC` 兜底，保证 `furthest_stage` 与 `furthest_offer_status` 取自同一条投递；`applications` 目前只有 `(candidate_id)` 与 `(job_id, stage, updated_at)` 索引，候选人量级上万时可评估加 `(candidate_id, status, stage, updated_at)` 覆盖索引。
+- **独立评审与修复**：独立评审 `reviewer2`（只读 `git diff`）初判「暂不建议交付」，提出 3 Medium + 4 Low，已全部修复：
+  1. Medium 搜索防抖窗口内旧响应仍会落地（改关键词后 220ms 内新请求还没发，旧 `seq` 仍匹配）→ `useEffect` 里条件一变先 `requestSeq.current += 1` 作废在途请求。
+  2. Medium 共享 `Tabs` 新增的键盘自动激活会放大职位页的请求乱序 → `JobsPage` 补 `requestSeq` 守卫（success/error/finally 三处早退）。
+  3. Medium 分组用例「总量 = 七组之和」是同一份推导自证，抓不住 offer/hired 分支写错 → 重写用例（见下）。
+  4. Low 搜索零命中时分类栏消失、空态却说「换个分类」→ 渲染条件补 `query.trim() || skill`，空态描述按关键词/分类分别给文案。
+  5. Low `Tabs` 缺分组名称、抢了上下方向键 → 加 `aria-label`，只处理左右/Home/End。
+  6. Low >700px 但容器变窄时仍靠横向滚动隐藏分类 → 改为始终换行。
+  7. Low 列表与详情的主投递排序在「同秒两条 offer」时可能不一致 → 前端 `pickPrimaryApplication` 补 `id` 兜底。
+- **测试有效性**：`server/test/api.test.ts` 的 `候选人按流程阶段分组，计数与筛选结果一致` 用真实接口与 SQL 造 8 位候选人，覆盖七个分类全部可达（待入职刻意造 `sent` 与 `accepted` 两条），断言 `groupCounts.all` 等于 `SELECT COUNT(*) FROM candidates` 的独立口径、每组等于「基线 + 增量」、每组包含本组样本且**不包含其他组样本**、待入职只含 `sent/accepted`、谈薪只含 `negotiating`、`group=pending&pageSize=1` 的 `pages === total` 且翻页取到不同记录、`group=none&q=…&skill=Go` 三者叠加命中 1 条、`group=bogus` 退化。**变异验证**：把 `server/src/services/candidates.ts:83` 的 `IN ('sent', 'accepted')` 临时改成 `IN ('accepted')`，该用例立即失败（`AssertionError`），还原后复跑 62/62 通过。
+- **验证结果**：
+  - `npm run check`（通过）、`npm run build`（通过，`index-C6b_IcNF.js` 411.56 kB / `index-DslrMm0o.css` 73.66 kB）、`npm test`（62/62 通过）、`npm run smoke`（80/80 通过，LOG 无控制台错误；首跑曾出现 79/80 且未定位到具体断言，随后连续三次 80/80）。
+  - 浏览器专项（`node /tmp/verify2.mjs http://127.0.0.1:8790`，0 项失败）：接口计数 `{"all":17,"screening":3,"interview":8,"negotiation":3,"pending":0,"hired":2,"rejected":1,"none":0}`；1440/1024/800 三档分类栏单行、8 个分类零隐藏、零横向滚动、`aria-label` 生效、「全部」计数与接口一致；390px 换行成 2 行、8 个分类全部可见；点「待筛选」后列表说明「「待筛选」3 位」且 3 行徽标全为本阶段，点「未投递」显示该分类空态，点「全部」恢复 17 行；键盘 ArrowRight 切到下一分类且焦点跟随、`roving tabindex` 只有 1 个、ArrowDown 不改变分类、End/Home 跳到末/首分类；搜索零命中时分类栏仍在（8 个）、表格为空、空态为「没有匹配的候选人」；职位页 ArrowRight 切换标签正常无报错；`console errors: none`。
+  - 截图：[1440 浅色](screenshots/candidates-fixed-1440.png)、[1024](screenshots/candidates-fixed-1024.png)、[800](screenshots/candidates-fixed-800.png)、[390 两行](screenshots/candidates-fixed-390.png)、[待筛选](screenshots/candidates-fixed-screening-1440.png)、[未投递空态](screenshots/candidates-fixed-none-1440.png)、[全部](screenshots/candidates-fixed-all-1440.png)、[键盘切换](screenshots/candidates-fixed-keyboard-1440.png)、[零命中](screenshots/candidates-fixed-nohit-1440.png)、[深色](screenshots/candidates-1440-dark.png)。
+  - 平台内置 `coding_check` 在本工作区仍返回 `Error: The coding operation could not be completed`（沿用第 16–18 节既有故障），自动验收 `ready` 仍为 `false`；本轮交付证据为本地实跑命令、变异验证、隔离浏览器专项与独立评审。
+
+### 19.1 第二轮评审修复（2026-11-27）
+
+`reviewer2` 对第一轮修复做只读复核，判「不建议交付」，提出 5 项。逐条处理如下：
+
+| # | 问题 | 处理 | 证据 |
+|---|------|------|------|
+| 1 | 改关键词后 220ms 防抖窗口内仍显示旧关键词的列表与人数，还能对旧结果翻页 | `CandidatesPage.tsx` 调度 effect 条件一变就 `setLoading(true)`，只把「发请求」延后 220ms；表格与 `.pagination` 只在 `!loading` 时渲染 | 浏览器实测：输入「林」后 120ms 采样 `rows=0`、`pagination=false`、`skeleton=true`；700ms 后只剩「林晨」、`筛出 1 位` |
+| 2 | 删除职位完成后调用的 `load()` 捕获了点击时的旧分类，会覆盖当前 Tab 的正确结果 | `JobsPage.tsx` 引入 `reloadKey`，调度 effect 依赖 `[load, query, reloadKey]`；删除与保存完成只 `setReloadKey(v => v + 1)`，刷新必定走「最新筛选」那次调度 | 竞态脚本（`Network.emulateNetworkConditions` latency 1200ms）：在「在招」点删除 → 250ms 内切「已暂停」→ 6s 后 `active=已暂停`、`cards=0`。**反向验证**：把 `setReloadKey` 换回 `load()` 重新构建后同一脚本失败（`active=已暂停` 但渲染 8 张「在招」卡片），改回后 PASS |
+| 3 | 测试缺口：待筛选样本被接口写成 `screening`（`new` 未测）、`q` 唯一命中使 `skill` 可被忽略、每人只有一条投递 | 见下「测试有效性补强」 | 三次变异验证均失败（`new` 映射、`skill` 筛选、阶段优先级反向），还原后 62/62 |
+| 4 | 纯空格关键词时空态/「添加候选人」按钮与接口口径不一致 | 统一改用 `query.trim()` 判断有无关键词（清空按钮、`list-note`、空态 title/description、空态内按钮） | 实测输入三个空格：17 行、`共 17 位候选人`、不出现「没有匹配的候选人」 |
+| 5 | 职位页/面试页 `Tabs` 无 `aria-label`；三页均未关联 `aria-controls`/`tabpanel` | 两页补 `label`（`按职位状态筛选` / `按面试状态筛选`）；`aria-controls`/`tabpanel` **本轮未做**，见「未覆盖」 | 实测三个 `tablist` 的 `aria-label` 均正确 |
+
+- **测试有效性补强**（`server/test/api.test.ts`）：`apply()` 支持指定职位；待筛选样本显式 `UPDATE applications SET stage = 'new'` 并断言 `stage === 'new'`；新增第二位未投递样本（技能 Python），`group=none&q=…` 期望 2 条、`groupCounts.none/all` 都是 2，再加 `&skill=Go` 期望 1 条且 `groupCounts` 收敛到 1；新增多投递用例（把已入职候选人再投一个职位），断言 `groupCounts.hired/screening` 不变、hired 分类仍包含他且 screening 不含。
+- **变异验证（三次，均先备份后还原）**：`IN ('new', 'screening')` → `IN ('screening')` 失败；`if (options.skill)` → `if (false && options.skill)` 失败；`CASE … END DESC` → `END ASC` 失败。每次失败后还原，最终 `npm test` 62/62。
+- **复跑结果**：`npm run check` 通过、`npm test` 62/62、`npm run build` 通过（`index-BcKp_FxP.js` 411.71 kB / `index-DslrMm0o.css` 73.66 kB）、`npm run smoke` 80/80（LOG 无控制台错误）、浏览器专项 `node /tmp/verify3.mjs http://127.0.0.1:8790` 与 `node /tmp/verify-race.mjs http://127.0.0.1:8790` 均 0 项失败。截图新增 [防抖中](screenshots/candidates-fixed-debounce-1440.png)、[纯空格关键词](screenshots/candidates-fixed-spaces-1440.png)、[删除后列表](screenshots/jobs-after-delete-1440.png)。
+
+### 19.1.1 第三轮评审修复：候选人保存后的刷新也改用当前筛选（阻塞项）
+
+`reviewer2` 第三次复核判「不建议交付」，指出与职位页同源的缺陷：在「待筛选」打开「添加候选人」，提交后趁请求未完成点「取消」再切到「已入职」，保存成功时 `CandidateFormModal` 里异步续体持有的 `onSaved` 仍会调用打开弹窗那次渲染的 `load()`（闭包里的 `group` 是「待筛选」），它拿到最新请求序号，于是「已入职」选中的状态下渲染出「待筛选」的列表，直到用户再切一次条件。
+
+- 修复：`CandidatesPage.tsx` 同样引入 `reloadKey`，调度 effect 依赖 `[load, query, reloadKey]`；`CandidateFormModal` 的 `onSaved` 改为 `setCreating(false)` + `setReloadKey(v => v + 1)`，刷新一律由调度 effect 用当前 `query/skill/group/page` 发起。至此列表页里不再有任何直接调用 `load()` 的写操作路径（`ErrorState` 的重试按钮除外，它同步触发，不存在跨渲染闭包）。
+- 实测（`/tmp/verify-save-race.mjs`，`Network.emulateNetworkConditions` latency 1200ms）：切「待筛选」→ 添加候选人 → 点「添加」→ 250ms 内点「取消」→ 切「已入职」→ 7s 后 `active=已入职2`、2 行徽标全为「已入职」。
+- **反向验证**：把 `onSaved` 换回 `load()` 并去掉 `reloadKey` 重新构建后，同一脚本失败：`active=已入职` 但渲染 3 行「待筛选」。改回修复版后重新构建，三个浏览器脚本（`verify3`、`verify-race`、`verify-save-race`）全部 0 项失败。
+
+### 19.2 上轮遗留事项
+
+- 三页标签与结果区的关联、候选人加载和失败时的旧人数，以及职位删除期间切换分类的自动化回归，已在[第 20 节](#20-分类结果区可访问性和人数更新)补齐。
+- 候选人详情页（`CandidateDetailPage`）按 id 刷新，不涉及列表筛选。
+- `applications` 的覆盖索引属于候选人量级上万时的独立性能评估。
+
+## 20. 分类结果区可访问性和人数更新
+
+目标页面为 `/candidates`、`/jobs`、`/interviews`。基线提交 `444758a`，验证的是其上本轮工作树的构建产物 `index-DwwKe_Pc.js` 与 `index-fZgjvUuY.css`。沿用 Hireloop 的颜色、排版与筛选组件。设计契约指纹为 `90d6a10e18e8aba9b4b4f50a75a301dd9a68be688811d16a8e902997460def11`，本轮样式 SHA-256 为 `2f78d53cce99255b1e6d2e34060cfe36eb2a2011c3678265fe5f0ecdabb2fdd2`。
+
+- 三页各分类标签的 `aria-controls` 对应稳定的结果面板，面板用 `aria-labelledby` 引用原标签。只有选中的面板可见并进入 Tab 顺序。方向键同步移动焦点，Tab 键可以进入结果区。
+- 候选人分类、关键词、技能、页码变化以及添加后刷新时，立即撤下旧结果、旧人数和分页。加载期间提示「正在加载…」。失败后保留分类入口和重试按钮，成功返回空结果时显示 `0`。在途旧响应不得覆盖当前结果。
+- 独立源码复核提出两处问题。重试和翻页会丢失焦点，面板包装会改变结果块的间距。修复后复核通过。重试和翻页前先把焦点移到当前面板，并恢复面板内部间距。
+- `npm run build` 通过，构建中包含前后端类型检查。`npm test` 通过 62/62。隔离 Chrome 通过 96/96 项冒烟断言，无控制台错误。回归覆盖三页的标签与结果区、候选人 503 后键盘重试、加载和空结果、迟到响应、键盘翻页，以及职位删除完成后刷新当前分类。
+- 目视检查了候选人页的 390 px 和 1440 px 浅色布局以及 1440 px 深色布局。窄屏分类完整显示，浅色截图可见进入结果区的键盘焦点环。减少动态效果由浏览器断言验证。屏幕阅读器实机未测。[手机浅色](screenshots/candidate-tabs-followup/candidate-groups-390.png)、[桌面浅色](screenshots/candidate-tabs-followup/candidate-groups-1440.png)、[桌面深色](screenshots/candidate-tabs-followup/candidate-groups-dark-1440.png)。
+- `coding_check` 仍返回 `Error: The coding operation could not be completed`，平台验收修订 26 缺少当前运行回执。工作树扫描的四条相似代码提醒对应候选人页的导入列表和共享面板的参数列表，人工核对没有重复逻辑。
+
+## 21. 候选人按投递职位筛选
+
+候选人页的「全部技能」已换成「全部职位」。选择职位后，列表、流程阶段与人数都以该职位的投递记录为准。关键词、流程阶段与职位可以叠加使用。「清空筛选」恢复全部候选人。职位选项包含暂停和关闭的职位，便于查询历史投递。
+
+- 目标页面为 `/candidates`。设计上下文指纹为 `94c83d0d49d9b0b09abb287dfcdb378798bd99b2d7018408bb66ed0b5f87b9b8`。基于 `444758a` 工作树构建了 `index-2v_yWQCe.js` 和 `index-CeYIZ4GV.css`，样式 SHA-256 为 `3e8635ef3e1b18ef28d851bae49f0213f99d3f04309fd65a96b5c177b9001f60`。
+- `npm run build` 和前后端类型检查通过。`npm test` 通过 65/65。接口回归覆盖多职位投递的状态隔离、历史拒绝、叠加搜索、分页和空职位。
+- 隔离 Chrome 冒烟检查通过 104/104，控制台无错误。实测选项加载失败和重试、无投递空态、真实投递后的职位及流程筛选、与关键词叠加、清空筛选及键盘焦点。独立源码复核确认「重试」与「清空筛选」激活后焦点移回搜索框。
+- 目视检查了 390 px 和 1440 px 浅色界面以及 1440 px 深色界面。浏览器验证了窄屏布局与减少动态效果。屏幕阅读器实机未测。[手机组合筛选](screenshots/candidate-job-filter/candidate-job-filter-390.png) · [桌面组合筛选](screenshots/candidate-job-filter/candidate-job-filter-1440.png) · [桌面深色](screenshots/candidate-job-filter/candidate-groups-dark-1440.png)。
+- `coding_check` 返回 `Error: The coding operation could not be completed`。平台验收修订 27 缺少当前运行回执，命令行验证结果见上。

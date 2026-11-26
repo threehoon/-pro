@@ -1,4 +1,4 @@
-import type { WorkflowFields, WorkflowDecision, AiStatus } from "./workflowTypes";
+import type { WorkflowFields, WorkflowDecision, AiStatus, OfferStatus } from "./workflowTypes";
 
 export type Stage = "new" | "screening" | "interview" | "offer" | "hired";
 export type ApplicationStatus = "active" | "rejected";
@@ -110,8 +110,23 @@ export interface Candidate {
   active_count?: number;
   rejected_count?: number;
   furthest_stage?: Stage | null;
+  /** 最近一条在流程投递的 offer 状态，用于把「谈薪」和「待入职」区分开。 */
+  furthest_offer_status?: OfferStatus | null;
   created_at: string;
   updated_at: string;
+}
+
+/** 候选人库的分组维度，与列表接口的 group 参数、计数键保持一致。 */
+export type CandidateGroup = "screening" | "interview" | "negotiation" | "pending" | "hired" | "rejected" | "none";
+
+export interface CandidateList {
+  items: Candidate[];
+  total: number;
+  page: number;
+  pageSize: number;
+  pages: number;
+  group?: CandidateGroup | "";
+  groupCounts?: { all: number } & Record<CandidateGroup, number>;
 }
 
 export interface ParsedFields {

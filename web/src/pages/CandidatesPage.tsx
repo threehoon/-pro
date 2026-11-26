@@ -1,8 +1,18 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { api, ApiError, type CandidateInput } from "../lib/api";
 import { bytesText, fmtDate, fmtDateTime, interviewTitle, stageColor, timeAgo } from "../lib/format";
 import { Link, useLocation, useNavigate } from "../lib/router";
-import type { Application, Candidate, CandidateDetail, Interview, Meta, ParsedFields, ParsedResume } from "../types";
+import type {
+  Application,
+  Candidate,
+  CandidateDetail,
+  CandidateGroup,
+  CandidateList,
+  Interview,
+  Meta,
+  ParsedFields,
+  ParsedResume,
+} from "../types";
 import {
   Avatar,
   Badge,
@@ -19,6 +29,8 @@ import {
   SearchInput,
   Select,
   StageBadge,
+  TabPanels,
+  Tabs,
   Textarea,
   useConfirm,
   useToast,
@@ -38,58 +50,105 @@ import {
   IconUpload,
 } from "../components/icons";
 
-import { applicationTarget, candidateLink, compareRounds, workflowStage } from "../lib/workflow";
+import { applicationTarget, boardStages, candidateLink, compareRounds, workflowStage } from "../lib/workflow";
 import { ScreeningPanel } from "../components/workflow/ScreeningPanel";
 import { OfferPanel } from "../components/workflow/OfferPanel";
 import { InterviewDrawer } from "../components/workflow/InterviewDrawer";
 import { ScheduleInterviewModal } from "../components/workflow/ScheduleInterviewModal";
 
+// 分类维度和表格的「流程」列一一对应：boardStages 的五个阶段，外加未进入流程的两种状态。
+const candidateGroups: Array<{ value: CandidateGroup | ""; label: string }> = [
+  { value: "", label: "全部" },
+  ...boardStages.map((stage) => ({ value: stage.key as CandidateGroup, label: stage.label })),
+  { value: "rejected", label: "已拒绝" },
+  { value: "none", label: "未投递" },
+];
+
+// 列表徽标和上面的分类用同一套判定，避免「待入职」在行内被显示成「谈薪」。
+function candidateStageBadge(candidate: Candidate) {
+  if (candidate.active_count && candidate.furthest_stage) {
+    const stage = workflowStage({ stage: candidate.furthest_stage, offer_status: candidate.furthest_offer_status });
+    return <StageBadge label={stage.label} color={stageColor(stage.color)} />;
+  }
+  if (candidate.rejected_count) return <Badge tone="danger">已拒绝</Badge>;
+  return <span className="muted">未投递</span>;
+}
+
+type JobOptions = Awaited<ReturnType<typeof api.jobOptions>>["items"];
+
 export function CandidatesPage({ meta, canWrite }: { meta: Meta; canWrite: boolean }) {
-  const [items, setItems] = useState<Candidate[]>([]);
-  const [total, setTotal] = useState(0);
+  const tabIdBase = useId();
+  const activePanelRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [page, setPage] = useState(1);
-  const [pages, setPages] = useState(1);
   const [query, setQuery] = useState("");
-  const [skill, setSkill] = useState("");
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  const [jobId, setJobId] = useState("");
+  const [group, setGroup] = useState<CandidateGroup | "">("");
   const [creating, setCreating] = useState(false);
-  const [skillPool, setSkillPool] = useState<Array<{ skill: string; n: number }>>([]);
-  // 快速输入时后发的请求可能先返回，用序号丢弃过期响应
+  const [reloadKey, setReloadKey] = useState(0);
+  const [jobOptions, setJobOptions] = useState<JobOptions | null>(null);
+  const [jobOptionsFailed, setJobOptionsFailed] = useState(false);
+  const [jobOptionsAttempt, setJobOptionsAttempt] = useState(0);
   const requestSeq = useRef(0);
+  const keyword = query.trim();
+
+  // 保存后也生成新的查询标识。条件变化时，渲染阶段立即撤下旧结果和人数。
+  const request = useMemo(() => ({
+    params: { q: keyword || undefined, jobId: jobId || undefined, group: group || undefined, page, pageSize: 20 },
+    reloadKey,
+  }), [keyword, jobId, group, page, reloadKey]);
+  const [result, setResult] = useState<({ request: typeof request } & (
+    | { status: "success"; data: CandidateList }
+    | { status: "error"; message: string }
+  )) | null>(null);
 
   const load = useCallback(() => {
     const seq = ++requestSeq.current;
-    setLoading(true);
-    setError("");
-    api
-      .candidates({ q: query.trim() || undefined, skill: skill || undefined, page, pageSize: 20 })
-      .then((data) => {
+    setResult(null);
+    api.candidates(request.params).then(
+      (data) => {
+        if (seq === requestSeq.current) setResult({ request, status: "success", data });
+      },
+      (err: unknown) => {
         if (seq !== requestSeq.current) return;
-        setItems(data.items);
-        setTotal(data.total);
-        setPages(data.pages);
-      })
-      .catch((err: unknown) => {
-        if (seq !== requestSeq.current) return;
-        setError(err instanceof ApiError ? err.message : "候选人加载失败");
-      })
-      .finally(() => {
-        if (seq === requestSeq.current) setLoading(false);
-      });
-  }, [query, skill, page]);
+        const message = err instanceof ApiError ? err.message : "候选人加载失败";
+        setResult({ request, status: "error", message });
+      },
+    );
+  }, [request]);
 
   useEffect(() => {
-    const timer = window.setTimeout(load, query ? 220 : 0);
-    return () => window.clearTimeout(timer);
-  }, [load, query]);
+    const timer = window.setTimeout(load, keyword ? 220 : 0);
+    return () => {
+      window.clearTimeout(timer);
+      requestSeq.current += 1;
+    };
+  }, [load, keyword]);
 
   useEffect(() => {
-    api
-      .skills()
-      .then((data) => setSkillPool(data.items))
-      .catch(() => setSkillPool([]));
-  }, []);
+    let ignore = false;
+    api.jobOptions().then(
+      ({ items }) => { if (!ignore) setJobOptions(items); },
+      () => { if (!ignore) setJobOptionsFailed(true); },
+    );
+    return () => { ignore = true; };
+  }, [jobOptionsAttempt]);
+
+  const currentResult = result?.request === request ? result : null;
+  const loading = currentResult === null;
+  const data = currentResult?.status === "success" ? currentResult.data : null;
+  const groupLabel = candidateGroups.find((tab) => tab.value === group)?.label ?? "";
+  const groupCounts = data?.groupCounts;
+
+  function changePage(next: number) {
+    activePanelRef.current?.focus();
+    setPage(next);
+  }
+
+  function retry() {
+    activePanelRef.current?.focus();
+    load();
+  }
 
   return (
     <div className="page">
@@ -103,31 +162,67 @@ export function CandidatesPage({ meta, canWrite }: { meta: Meta; canWrite: boole
         )}
       />
 
+      <div className="group-tabs">
+        <Tabs
+          idBase={tabIdBase}
+          label="按流程阶段分类"
+          value={group}
+          onChange={(value) => {
+            if (value === group) return;
+            setGroup(value as CandidateGroup | "");
+            setPage(1);
+          }}
+          tabs={candidateGroups.map((tab) => ({
+            ...tab,
+            count: groupCounts?.[tab.value || "all"],
+          }))}
+        />
+      </div>
+
       <div className="toolbar">
         <div className="toolbar-left">
-          <SearchInput value={query} onChange={(value) => { setQuery(value); setPage(1); }} placeholder="搜索姓名、公司、职位或技能" />
+          <SearchInput
+            inputRef={searchInputRef}
+            value={query}
+            onChange={(value) => { setQuery(value); setPage(1); }}
+            placeholder="搜索姓名、公司、职位或技能"
+          />
           <Select
-            value={skill}
+            className="candidate-job-filter"
+            value={jobId}
+            disabled={jobOptions === null || jobOptions.length === 0}
             onChange={(event) => {
-              setSkill(event.target.value);
+              setJobId(event.target.value);
               setPage(1);
             }}
-            aria-label="按技能筛选"
+            aria-label="按投递职位筛选"
           >
-            <option value="">全部技能</option>
-            {skillPool.map((item) => (
-              <option key={item.skill} value={item.skill}>
-                {item.skill}（{item.n}）
+            <option value="">{jobOptions || jobOptionsFailed ? "全部职位" : "职位加载中…"}</option>
+            {jobOptions?.map((job) => (
+              <option key={job.id} value={job.id}>
+                {job.title}{job.department && ` · ${job.department}`}
+                {job.status === "closed" ? "（已关闭）" : job.status === "paused" ? "（已暂停）" : ""}
               </option>
             ))}
           </Select>
-          {(query || skill) && (
+          {jobOptionsFailed && (
+            <Button variant="ghost" size="sm" onClick={(event) => {
+              if (document.activeElement === event.currentTarget) searchInputRef.current?.focus();
+              setJobOptionsFailed(false);
+              setJobOptionsAttempt((value) => value + 1);
+            }}>
+              职位加载失败，重试
+            </Button>
+          )}
+          {(keyword || jobId || group) && (
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => {
+              onClick={(event) => {
+                if (document.activeElement === event.currentTarget) searchInputRef.current?.focus();
                 setQuery("");
-                setSkill("");
+                setJobId("");
+                setGroup("");
                 setPage(1);
               }}
             >
@@ -136,114 +231,129 @@ export function CandidatesPage({ meta, canWrite }: { meta: Meta; canWrite: boole
           )}
         </div>
         <div className="toolbar-right">
-          <span className="list-note">
-            {query || skill ? `筛出 ${total} 位` : `共 ${total} 位候选人`}
+          <span className="list-note" role="status">
+            {loading ? "正在加载…" : data && (group
+              ? `「${groupLabel}」${data.total} 位`
+              : keyword || jobId
+                ? `筛出 ${data.total} 位`
+                : `共 ${data.total} 位候选人`)}
           </span>
         </div>
       </div>
 
-      {loading && <ListSkeleton rows={6} />}
-      {error && <ErrorState message={error} onRetry={() => load()} />}
+      <TabPanels idBase={tabIdBase} tabs={candidateGroups} value={group} busy={loading} activeRef={activePanelRef}>
+        {loading && <ListSkeleton rows={6} />}
+        {currentResult?.status === "error" && <ErrorState message={currentResult.message} onRetry={retry} />}
 
-      {!loading && !error && items.length === 0 && (
-        <EmptyState
-          title={query || skill ? "没有匹配的候选人" : "还没有候选人"}
-          description={query || skill ? "换个关键词或清空筛选。" : "上传一份简历，或手动录入候选人。"}
-          action={
-            canWrite && !query && !skill ? (
+        {data && data.items.length === 0 && (
+          <EmptyState
+            title={
+              keyword || jobId
+                ? "没有匹配的候选人"
+                : group
+                  ? `「${groupLabel}」下还没有候选人`
+                  : "还没有候选人"
+            }
+            description={
+              jobId
+                ? "换个职位、流程阶段或关键词，也可以清空筛选。"
+                : keyword
+                  ? "换个关键词或清空筛选看看。"
+                  : group
+                    ? "换个分类或清空筛选看看。"
+                    : "上传一份简历，或手动录入候选人。"
+            }
+            action={canWrite && !group && !keyword && !jobId && (
               <Button variant="primary" onClick={() => setCreating(true)}>
                 添加候选人
               </Button>
-            ) : undefined
-          }
-        />
-      )}
+            )}
+          />
+        )}
 
-      {!loading && !error && items.length > 0 && (
-        <>
-          <div className="table-wrap">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>候选人</th>
-                  <th>当前职位</th>
-                  <th>经验</th>
-                  <th>技能</th>
-                  <th>流程</th>
-                  <th>更新</th>
-                </tr>
-              </thead>
-              <tbody>
-                {items.map((candidate) => (
-                  <tr key={candidate.id}>
-                    <td>
-                      <div className="cell-person">
-                        <Avatar name={candidate.name} size={32} />
-                        <div>
-                          <Link to={`/candidates/${candidate.id}`}>{candidate.name}</Link>
-                          <span className="muted">{candidate.email ?? candidate.phone ?? "无联系方式"}</span>
-                        </div>
-                      </div>
-                    </td>
-                    <td>
-                      <span>{candidate.current_title ?? "—"}</span>
-                      <span className="muted">{candidate.current_company ?? ""}</span>
-                    </td>
-                    <td>
-                      {candidate.years_experience == null
-                        ? "—"
-                        : candidate.years_experience <= 0
-                          ? "应届 / 1 年内"
-                          : `${candidate.years_experience} 年`}
-                    </td>
-                    <td>
-                      <div className="cell-skills">
-                        {candidate.skills.slice(0, 3).map((item) => (
-                          <span className="tag" key={item}>
-                            {item}
-                          </span>
-                        ))}
-                        {candidate.skills.length > 3 && <span className="tag more">+{candidate.skills.length - 3}</span>}
-                        {candidate.skills.length === 0 && <span className="muted">—</span>}
-                      </div>
-                    </td>
-                    <td>
-                      {candidate.active_count && candidate.furthest_stage ? (
-                        <StageBadge
-                          label={workflowStage({ stage: candidate.furthest_stage }).label}
-                          color={stageColor(candidate.furthest_stage)}
-                        />
-                      ) : candidate.rejected_count ? (
-                        <Badge tone="danger">已拒绝</Badge>
-                      ) : (
-                        <span className="muted">未投递</span>
-                      )}
-                    </td>
-                    <td className="muted">{timeAgo(candidate.updated_at)}</td>
+        {data && data.items.length > 0 && (
+          <>
+            <div className="table-wrap">
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>候选人</th>
+                    <th>当前职位</th>
+                    <th>经验</th>
+                    <th>技能</th>
+                    <th>流程</th>
+                    <th>更新</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {data.items.map((candidate) => (
+                    <tr key={candidate.id}>
+                      <td>
+                        <div className="cell-person">
+                          <Avatar name={candidate.name} size={32} />
+                          <div>
+                            <Link to={`/candidates/${candidate.id}`}>{candidate.name}</Link>
+                            <span className="muted">{candidate.email ?? candidate.phone ?? "无联系方式"}</span>
+                          </div>
+                        </div>
+                      </td>
+                      <td>
+                        <span>{candidate.current_title ?? "—"}</span>
+                        <span className="muted">{candidate.current_company ?? ""}</span>
+                      </td>
+                      <td>
+                        {candidate.years_experience == null
+                          ? "—"
+                          : candidate.years_experience <= 0
+                            ? "应届 / 1 年内"
+                            : `${candidate.years_experience} 年`}
+                      </td>
+                      <td>
+                        <div className="cell-skills">
+                          {candidate.skills.slice(0, 3).map((item) => (
+                            <span className="tag" key={item}>
+                              {item}
+                            </span>
+                          ))}
+                          {candidate.skills.length > 3 && <span className="tag more">+{candidate.skills.length - 3}</span>}
+                          {candidate.skills.length === 0 && <span className="muted">—</span>}
+                        </div>
+                      </td>
+                      <td>{candidateStageBadge(candidate)}</td>
+                      <td className="muted">{timeAgo(candidate.updated_at)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
 
-          {pages > 1 && (
-            <nav className="pagination" aria-label="分页">
-              <Button size="sm" disabled={page <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>
-                上一页
-              </Button>
-              <span>
-                {page} / {pages}
-              </span>
-              <Button size="sm" disabled={page >= pages} onClick={() => setPage((value) => Math.min(pages, value + 1))}>
-                下一页
-              </Button>
-            </nav>
-          )}
-          <p className="sr-only">{meta.stages.length} 个阶段可用</p>
-        </>
-      )}
+            {data.pages > 1 && (
+              <nav className="pagination" aria-label="分页">
+                <Button size="sm" disabled={page <= 1} onClick={() => changePage(page - 1)}>
+                  上一页
+                </Button>
+                <span>
+                  {page} / {data.pages}
+                </span>
+                <Button size="sm" disabled={page >= data.pages} onClick={() => changePage(page + 1)}>
+                  下一页
+                </Button>
+              </nav>
+            )}
+            <p className="sr-only">{meta.stages.length} 个阶段可用</p>
+          </>
+        )}
+      </TabPanels>
 
-      <CandidateFormModal open={creating} meta={meta} onClose={() => setCreating(false)} onSaved={() => { setCreating(false); load(); }} />
+      <CandidateFormModal
+        open={creating}
+        meta={meta}
+        onClose={() => setCreating(false)}
+        onSaved={() => {
+          setCreating(false);
+          setReloadKey((value) => value + 1);
+        }}
+      />
     </div>
   );
 }
@@ -456,7 +566,12 @@ function pickPrimaryApplication(applications: Application[]): Application | null
   if (active.length > 0) {
     return (
       [...active].sort(
-        (a, b) => STAGE_WEIGHT[b.stage] - STAGE_WEIGHT[a.stage] || b.updated_at.localeCompare(a.updated_at),
+        // 与服务端 listCandidates 的 FURTHEST_STAGE_ORDER 对齐：阶段 → 更新时间 → id，
+        // 这样列表徽标和详情头部不会各自挑到不同的投递。
+        (a, b) =>
+          STAGE_WEIGHT[b.stage] - STAGE_WEIGHT[a.stage] ||
+          b.updated_at.localeCompare(a.updated_at) ||
+          (a.id < b.id ? 1 : a.id > b.id ? -1 : 0),
       )[0] ?? null
     );
   }
@@ -1005,7 +1120,7 @@ export function ApplyModal({
   onDone: () => void;
 }) {
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
-  const [jobs, setJobs] = useState<Array<{ id: string; title: string; status: string; department: string | null }> | null>(null);
+  const [jobs, setJobs] = useState<JobOptions | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const toast = useToast();

@@ -3,6 +3,7 @@ import type {
   ApplicationDetail,
   BoardData,
   CandidateDetail,
+  CandidateList,
   DashboardData,
   FeishuStatus,
   Interview,
@@ -195,10 +196,7 @@ export const api = {
   },
 
   candidates: (params?: Query) =>
-    request<{ items: import("../types").Candidate[]; total: number; page: number; pageSize: number; pages: number }>(
-      "GET",
-      `/candidates${qs(params)}`,
-    ),
+    request<CandidateList>("GET", `/candidates${qs(params)}`),
   candidate: (id: string) => request<CandidateDetail>("GET", `/candidates/${id}`),
   createCandidate: (input: CandidateInput) =>
     request<{ candidate: import("../types").Candidate }>("POST", "/candidates", input),

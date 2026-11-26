@@ -1,0 +1,46 @@
+{
+  "name": "hireloop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Hireloop — 招聘工作台（职位、候选人、简历解析、流程看板、面试）",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c green,cyan \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "node --watch server/src/index.ts",
+    "dev:web": "vite --config web/vite.config.ts",
+    "build": "npm run check && vite build --config web/vite.config.ts",
+    "start": "NODE_ENV=production node server/src/index.ts",
+    "check": "tsc -p server/tsconfig.json --noEmit && tsc -p web/tsconfig.json --noEmit",
+    "test": "node --test --test-reporter=spec \"server/test/*.test.ts\"",
+    "seed": "node server/src/db/seed.ts",
+    "db:reset": "node server/src/db/reset.ts",
+    "flow": "node scripts/flow.mjs",
+    "smoke": "node scripts/ui-smoke.mjs",
+    "smoke:permissions": "node scripts/permissions.mjs",
+    "smoke:heading": "node scripts/heading-state.mjs"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/multipart": "^9.0.3",
+    "@fastify/static": "^8.0.3",
+    "bcryptjs": "^3.0.2",
+    "fastify": "^5.2.1",
+    "mammoth": "^1.9.0",
+    "pdfjs-dist": "^5.4.149",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/react": "^19.0.7",
+    "@types/react-dom": "^19.0.3",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.7"
+  }
+}

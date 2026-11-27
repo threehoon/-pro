@@ -1,4 +1,4 @@
-import type { AiResult, CompositeData, LlmConfig, OfferData, OfferInput, ProfileContent, ProfileData, ScreeningData, ScreenTier, SummaryData, TodayItem, WorkflowDecision } from "../workflowTypes";
+import type { AiResult, AsrConfig, CompositeData, LlmConfig, TranscriptDraft, OfferData, OfferInput, ProfileContent, ProfileData, ScreeningData, ScreenTier, SummaryData, TodayItem, WorkflowDecision } from "../workflowTypes";
 import type {
   ApplicationDetail,
   BoardData,
@@ -261,6 +261,14 @@ export const api = {
   saveLlmConfig: (input: { baseUrl: string; model: string; apiKey?: string; thinking?: "off" | "on" }) =>
     request<AiResult<LlmConfig>>("POST", "/settings/llm", input),
   testLlm: () => request<AiResult<{ latencyMs: number; model: string }>>("POST", "/settings/llm/test"),
+  asrConfig: () => request<AiResult<AsrConfig>>("GET", "/settings/asr"),
+  saveAsrConfig: (input: { baseUrl: string; model: string; apiKey?: string; language?: string }) =>
+    request<AiResult<AsrConfig>>("POST", "/settings/asr", input),
+  transcribeInterview: (id: string, file: File) => {
+    const form = new FormData();
+    form.append("file", file);
+    return request<AiResult<TranscriptDraft>>("POST", `/interviews/${id}/transcribe`, undefined, { form });
+  },
   feishu: () => request<FeishuStatus>("GET", "/settings/feishu"),
   saveFeishu: (patch: Record<string, string>) => request<FeishuStatus>("PUT", "/settings/feishu", patch),
   testFeishuApp: () => request<import("../types").FeishuAppTestResult>("POST", "/settings/feishu/test-app", {}),

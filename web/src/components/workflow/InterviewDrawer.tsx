@@ -7,9 +7,14 @@ import type { Interview } from "../../types";
 import type { AiStatus, ComparativePoint, WorkflowDecision } from "../../workflowTypes";
 import { requireAiResult, useWorkflowResource } from "./resource";
 import { ArchiveReasonField, defaultArchiveReason } from "./ArchiveReasonField";
+import { IconUpload } from "../icons";
 
 const summaryLabels: Record<AiStatus, string> = { none: "待总结", generating: "总结生成中", ready: "总结已就绪", failed: "总结失败", manual: "人工结论" };
 const decisions = { advance: "进入复试", negotiate: "进入谈薪", reject: "归档投递" } as const;
+const audioAccept = ".mp3,.m4a,.wav,.webm,.ogg,.oga,.aac,.flac,.amr,.mp4,.mov";
+const audioBytes = 20 * 1024 * 1024;
+/** 和 constants.ts 的 AUDIO_EXTENSIONS 保持一致：先在前端挡一次，别让 20 MB 白传一趟。 */
+const audioPattern = /\.(mp3|m4a|wav|webm|ogg|oga|aac|flac|amr|mp4|mov)$/i;
 const finished = (status: AiStatus | undefined) => status === "ready" || status === "manual";
 
 /** 生成期间显示已等待时长：一句不动的文案会让人以为卡死。 */
@@ -40,6 +45,8 @@ export function InterviewDrawer({ interview, canWrite, rejectionReasons, onClose
   const [notice, setNotice] = useState("");
   const [liveInterview, setLiveInterview] = useState<Interview>(interview);
   const [autoSyncing, setAutoSyncing] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const audioInput = useRef<HTMLInputElement | null>(null);
   // 服务端说还没配置共享日历时就不再显示「未同步」和同步按钮，免得每次点都报错
   const [calendarOff, setCalendarOff] = useState(false);
   // 每次打开详情最多自动补同步一次，失败后交给手动按钮，避免反复调用飞书
@@ -74,6 +81,24 @@ export function InterviewDrawer({ interview, canWrite, rejectionReasons, onClose
   const needsComposite = interview.round > 1 && decision === "negotiate";
   const needsOverride = needsComposite && (compositeData?.status === "none" || compositeData?.status === "failed");
   const waiting = decision !== "reject" && (!finished(status) || (needsComposite && !finished(compositeData?.status) && !needsOverride));
+
+  async function transcribeAudio(file: File) {
+    if (!audioPattern.test(file.name)) {
+      setError("只支持 mp3、m4a、wav、webm 等常见录音格式。");
+      return;
+    }
+    if (file.size > audioBytes) {
+      setError("录音超过 20 MB，请剪短或降低码率后重试。");
+      return;
+    }
+    await run("transcribe", async () => {
+      const result = requireAiResult(await api.transcribeInterview(interview.id, file), "录音转写失败");
+      const merged = source.trim() ? `${source.trimEnd()}\n\n${result.text}` : result.text;
+      setTranscript(merged);
+      const cut = result.truncated ? "（超出 12,000 字的部分已截断）" : "";
+      setNotice(`已转写 ${result.chars.toLocaleString("zh-CN")} 字${cut}，请核对后点「保存逐字稿并生成」。`);
+    });
+  }
 
   async function run(action: string, task: () => Promise<void>) {
     setBusy(action);
@@ -211,6 +236,27 @@ export function InterviewDrawer({ interview, canWrite, rejectionReasons, onClose
           {summary.suggested && <p><strong>建议：{decisions[summary.suggested]}</strong>{summary.reason && ` · ${summary.reason}`}</p>}
         </div>}
         {(canSummarize || source) && <details className="workflow-disclosure" open={canSummarize && status === "none" ? true : undefined}><summary>面试逐字稿</summary>
+          {canSummarize && <div className={`upload-zone transcript-upload${dragging ? " is-dragging" : ""}`}
+            onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={(event) => {
+              event.preventDefault();
+              setDragging(false);
+              const file = event.dataTransfer.files?.[0];
+              if (file && !busy) void transcribeAudio(file);
+            }}>
+            <div>
+              <strong>录音转写</strong>
+              <p className="muted">把面试录音拖到这里，或选择文件。支持 mp3、m4a、wav、webm 等，单个不超过 20 MB；转写结果会先进下面的输入框，核对后再生效。</p>
+            </div>
+            <input ref={audioInput} type="file" accept={audioAccept} hidden onChange={(event) => {
+              const file = event.currentTarget.files?.[0];
+              event.currentTarget.value = "";
+              if (file) void transcribeAudio(file);
+            }} />
+            <Button type="button" icon={<IconUpload size={16} />} loading={busy === "transcribe"} disabled={!!busy} onClick={() => audioInput.current?.click()}>选择录音</Button>
+          </div>}
+          {busy === "transcribe" && <ProgressStatus label="正在上传并转写录音" estimate="1 分钟录音通常 10–30 秒" />}
           <Field label="逐字稿" hint={canSummarize ? `当前 ${source.trim().length} 字 · 至少 200 字，超出 12,000 字部分会截断用于生成。` : undefined}>{(id) => <Textarea id={id} rows={8} value={source} readOnly={!canSummarize} onChange={(e) => setTranscript(e.target.value)} />}</Field>
           {canSummarize && <Button loading={busy === "transcript"} disabled={!!busy || !data || source.trim().length < 200 || poll} onClick={() => void run("transcript", async () => {
             const { data: result, reason: hint } = await api.saveTranscript(interview.id, source);

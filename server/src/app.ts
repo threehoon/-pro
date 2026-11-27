@@ -7,7 +7,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { AppError } from './lib/errors.ts';
 import { SESSION_COOKIE, resolveSession } from './auth.ts';
-import { RESUME_MAX_BYTES } from './constants.ts';
+import { AUDIO_MAX_BYTES } from './constants.ts';
 import { authRoutes } from './routes/auth.ts';
 import { jobRoutes } from './routes/jobs.ts';
 import { candidateRoutes } from './routes/candidates.ts';
@@ -55,7 +55,8 @@ export async function buildApp(options: { logger?: boolean } = {}): Promise<Fast
 
   await app.register(cookie);
   await app.register(multipart, {
-    limits: { fileSize: RESUME_MAX_BYTES, files: 1 },
+    // 面试录音比简历大，上限按录音定；简历的 8 MB 限制由上传接口自己再卡一次。
+    limits: { fileSize: AUDIO_MAX_BYTES, files: 1 },
   });
 
   app.decorateRequest('user', null);

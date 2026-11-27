@@ -189,6 +189,24 @@ export interface TodayItem {
   jobId?: string;
   candidateId?: string;
 }
+export interface AsrConfig {
+  baseUrl: string;
+  model: string;
+  /** 固定语种能明显减少转写乱码，auto 表示交给服务商判断。 */
+  language: string;
+  keyTail: string | null;
+  configured: boolean;
+}
+
+/** 录音转写的中间结果：只回文字，等人工核对后才会保存成逐字稿。 */
+export interface TranscriptDraft {
+  text: string;
+  model: string;
+  chars: number;
+  truncated: boolean;
+  durationSeconds: number | null;
+}
+
 export interface LlmConfig {
   baseUrl: string;
   model: string;

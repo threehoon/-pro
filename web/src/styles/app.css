@@ -2741,6 +2741,12 @@ a.status-chip-more:hover {
   background: color-mix(in srgb, var(--brand) 4%, var(--surface));
 }
 
+.upload-zone.is-dragging {
+  border-style: solid;
+  border-color: var(--brand);
+  background: color-mix(in srgb, var(--brand) 7%, var(--surface));
+}
+
 .upload-zone.busy {
   border-style: solid;
   border-color: color-mix(in srgb, var(--brand) 40%, transparent);
@@ -4020,4 +4026,21 @@ a.status-chip-more:hover {
 
 [data-theme="dark"] .badge {
   background: rgba(255, 255, 255, 0.06);
+}
+
+/* 面试录音转写：说明文字允许换行，按钮不被挤压 */
+.transcript-upload p {
+  margin: 2px 0 0;
+  font-size: var(--fs-12);
+  line-height: 1.5;
+}
+
+@media (max-width: 767px) {
+  .transcript-upload {
+    flex-wrap: wrap;
+  }
+
+  .transcript-upload > div {
+    flex-basis: 100%;
+  }
 }

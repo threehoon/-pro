@@ -50,7 +50,16 @@ export function entityTypeForTable(tableId: string): EntityType | null {
   return null;
 }
 
+/**
+ * 同一个库可能同时被两个进程服务（例如本机开发 + 局域网实例）。
+ * 长连接只能有一个持有者，否则同一事件会被处理两遍；用 `HIRELOOP_BITABLE=off` 让副实例只读不参与。
+ */
+export function bitableSyncDisabled(): boolean {
+  return process.env.HIRELOOP_BITABLE === 'off';
+}
+
 export function bitableSyncOpen(): boolean {
+  if (bitableSyncDisabled()) return false;
   const config = storedBitableConfig();
   return Boolean(config.enabled && config.appToken);
 }

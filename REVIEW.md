@@ -441,3 +441,11 @@
 - **检查**：`npm run check` 通过；`npm run test` **76/76** 通过（新增用例：富文本/嵌套 JSON 拍平、选项 id → 文案、空单元格不覆盖、演示数据灌入与清理）；`npm run build` 通过（产物 `index-BTB6GY1w.js` / `index-CgQTa6h5.css`）；`git diff --check` 通过。
 - **未验证**：设置页新增的两个按钮未在浏览器里点过（接口与用例已覆盖，页面只是调用）；`1254291` 并发写退避与 `1254043` 行被删重建仍未实测；兜底对账的定时器（10 分钟）没有长时间跑过一轮。
 - **平台证据限制**：`coding_check` 仍不可用（`Error: The coding operation could not be completed`），以上均为终端直接执行的命令结果。
+
+## 30. 两个实例共用一个库时，长连接只让一个持有（2026-11-27）
+
+- **背景**：本机开发实例（8787）和局域网实例（8790）跑的是同一个 `server/data/hireloop.db`，两边都会读到 `bitable_config.enabled=1` 并各自建一条飞书长连接，同一事件被处理两遍、各自再推一次，`1254291`（同表并发写）风险随之出现。
+- **改动**：`server/src/services/bitable-sync.ts` 增 `bitableSyncDisabled()`（`HIRELOOP_BITABLE === 'off'`），`bitableSyncOpen()` 先看它，队列推送因此整体停摆；`server/src/integrations/bitable-events.ts` 的 `startBitableEvents()` 在该开关下直接返回 `{started:false, reason:'本实例以 HIRELOOP_BITABLE=off 运行，同步交给另一个实例'}`。
+- **实际部署**：8787（开发，`node --watch`）以 `HIRELOOP_BITABLE=off` 启动，`connection: idle`；8790（局域网，生产构建）持有长连接，`connection: connected`。实测在表格里改一格，8790 回写成功（`applied | 写入 1 条`、审计 `{"field":"feedback","length":8}`），随后两条回推事件 `ignored`。
+- **检查**：`npm run check` 通过；`npm run test` **76/76**；`npm run build` 通过（`index-BTB6GY1w.js` / `index-CgQTa6h5.css`）。
+- **未验证**：开关本身的负向用例只在真实进程上验证（`connection: idle`），没有写成自动化用例——写用例需要在子进程里重启服务，成本高于收益。

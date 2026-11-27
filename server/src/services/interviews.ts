@@ -366,6 +366,7 @@ export function listInterviews(options: {
   return all<InterviewListItem>(
     `SELECT i.id, i.application_id, i.round, i.title, i.mode, i.scheduled_at, i.duration_minutes,
             i.status, i.summary_status, i.location, i.meeting_url, i.interviewer_id, u.name AS interviewer_name,
+            CASE WHEN COALESCE(u.feishu_open_id, '') <> '' THEN 1 ELSE 0 END AS interviewer_feishu_bound,
             i.recommendation, i.advance_recommended,
             i.external_calendar_event_id, i.calendar_sync_status, i.calendar_sync_error, i.calendar_synced_at,
             c.id AS candidate_id, c.name AS candidate_name,
@@ -811,6 +812,7 @@ export function markNoShow(interviewId: string, actorId: string): InterviewRow {
 export function interviewWithContext(interviewId: string) {
   const row = getRow<Record<string, unknown>>(
     `SELECT ${INTERVIEW_FIELDS}, u.name AS interviewer_name,
+            CASE WHEN COALESCE(u.feishu_open_id, '') <> '' THEN 1 ELSE 0 END AS interviewer_feishu_bound,
             c.id AS candidate_id, c.name AS candidate_name,
             j.id AS job_id, j.title AS job_title
      FROM interviews i

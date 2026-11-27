@@ -262,6 +262,15 @@ export function InterviewDrawer({ interview, canWrite, rejectionReasons, onClose
         ? { label: "未同步飞书日历", tone: "neutral" as const }
         : null);
   const meetingUrl = liveInterview.status === "cancelled" ? null : safeMeetingUrl(liveInterview.meeting_url);
+  // 日程本身会写进招聘日历；只有绑定了飞书的面试官才会收到邀请/私信，这里把差别说清楚，免得以为没同步
+  const calendarInviteHint =
+    liveInterview.status !== "scheduled" || liveInterview.is_draft
+      ? null
+      : !liveInterview.interviewer_id
+        ? "还没指派面试官：日程只写进招聘日历，不会给任何人发邀请。"
+        : liveInterview.interviewer_feishu_bound
+          ? null
+          : `${liveInterview.interviewer_name ?? "面试官"}还没绑定飞书：日程只写进招聘日历，不会给他发邀请和私信。`;
 
   async function syncCalendar() {
     setBusy("calendar");
@@ -315,6 +324,7 @@ export function InterviewDrawer({ interview, canWrite, rejectionReasons, onClose
               日历同步失败：{liveInterview.calendar_sync_error}
             </p>
           )}
+          {calendarInviteHint && <p className="muted interview-sync-hint">{calendarInviteHint}</p>}
         </section>
       )}
       {!resource.data && !resource.error && <ListSkeleton rows={2} />}

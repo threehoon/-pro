@@ -2698,6 +2698,14 @@ test('打开面试详情自动补同步：历史未同步记录补一次，重�
   await waitForCalendarSyncs();
   await waitForFeishuDispatches();
 
+  // 面试详情要能区分「面试官绑了飞书」和「没绑」，否则用户以为日历没同步（实际只是没有邀请）
+  const boundDetail = await app.inject({ method: 'GET', url: `/api/interviews/${interviewId}`, headers: { cookie: adminCookie } });
+  assert.equal(boundDetail.json().interview.interviewer_feishu_bound, 1);
+  run('UPDATE users SET feishu_open_id = NULL WHERE id = ?', [adminUserId]);
+  const unboundDetail = await app.inject({ method: 'GET', url: `/api/interviews/${interviewId}`, headers: { cookie: adminCookie } });
+  assert.equal(unboundDetail.json().interview.interviewer_feishu_bound, 0);
+  run('UPDATE users SET feishu_open_id = ? WHERE id = ?', ['ou_ensure_admin', adminUserId]);
+
   // 模拟「飞书日历配好之前创建、一直停在 none」的历史记录
   run(
     `UPDATE interviews SET calendar_sync_status = 'none', calendar_synced_at = NULL,

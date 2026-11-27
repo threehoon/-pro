@@ -39,25 +39,34 @@ npm run dev           # API 8787 + 前端 5173
 
 ## 4. 从哪读起
 
-1. `server/src/services/recruitment-ai.ts` 的 `generate()`（约 190 行）：一次生成怎么发、怎么重试、怎么记 `ai_runs`。
-2. `server/src/services/ai/prompts.ts`：五类提示词与版本号。
-3. `server/src/integrations/llm.ts` 的 `requestJson()`（约 172 行）：真实的网络路径。
-4. `docs/下一阶段开发文档.md` 第 4.0 节：统一约定（引用必须原文、禁用词、超时 45s、截断长度、24h 缓存）。
+1. `server/src/services/ai/prompts.ts`：`POLICY`（所有任务共用、要求「只返回指定 JSON」）、五类 instruction（画像 / 筛选 / 面试总结 / 面试题 / 综合评估）、`PROMPT_VERSIONS`。
+2. `server/src/services/recruitment-evidence.ts`：模型输出的 zod schema 与硬校验（`validateSummary`、`quoteExists`、禁用词、指标对齐）——提示词要求什么，这里就必须收得下；这里放开或收紧，直接决定模型输出能不能被采纳。
+3. `docs/下一阶段开发文档.md` 第 4.0 节：统一约定（引用必须原文、禁用词、超时 45s、截断长度、24h 缓存）。
+4. 只读参考：`server/src/services/recruitment-ai.ts` 的 `generate()` 负责把 `POLICY + instruction` 拼成一次请求、下发输出预算与超时、失败重试、写 `ai_runs`。**这层归框架侧，你只读不改。**
 
 ## 5. 干活前先量一次
 
-```bash
-npm run bench                      # 3~5 次最小请求，量连接开销
-npm run bench -- --runs 10         # p95 更稳
-npm run bench -- --job <jobId>     # 跑一次完整画像生成（耗 token，按需）
-npm run bench -- --json            # 整段贴进 PR
+改提示词不是改文案，是改结果分布，所以先取基线再动手：
+
+```sql
+-- 各任务最近的耗时与 token 分布（看输出长度，不看输入）
+SELECT kind, prompt_version, COUNT(*) n, ROUND(AVG(tokens_in)) tin, ROUND(AVG(tokens_out)) tout,
+       ROUND(AVG(duration_ms)) ms, SUM(status = 'failed') failed
+FROM ai_runs WHERE created_at > datetime('now', '-14 days') GROUP BY kind, prompt_version;
+
+-- 某一份面试的总结版本对比
+SELECT prompt_version, status, error, tokens_out, duration_ms, created_at
+FROM ai_runs WHERE kind = 'summary' AND subject_id = ? ORDER BY created_at DESC;
+
+-- 缓存命中（命中不计费，新增版本后应看到重新计算）
+SELECT DATE(created_at) day, SUM(COALESCE(error,'') = 'cache_hit') hits FROM ai_runs GROUP BY day;
 ```
 
-连接复用已开启（2026-11-27）：同进程内后续请求不再重建 DNS + TCP + TLS。独立测量本机到 `api.deepseek.com` 的建连耗时从约 **110–240ms** 降到约 **82–88ms**，首个请求仍要建连。
+对比时固定同一份输入（同一个面试转写 / 同一份简历），只换提示词版本，把 `PROMPT_VERSIONS` 递增后各跑一次，用 `ai_runs` 里的 `tokens_out` 与 `duration_ms` 说话。
 
-端到端 ping 的耗时主要由模型这次输出了多长决定，单次 p50 波动很大（同样 5 次可能 700ms 也可能 1041ms）。所以比较时看**最小值、失败数、以及 `ai_runs` 里的 `duration_ms` 分布**，不要用一次 p50 下结论。
+`npm run bench`（`--runs`、`--job`、`--json`）量的是传输与连接开销，用来验证框架侧的改动，**不要**拿它当提示词质量的证据。
 
-**任何优化 PR 都要贴改动前后的数字。** 没有数字的「感觉快多了」不进 dev。
+**任何提示词 PR 都要贴改动前后的 `ai_runs` 数字，以及 3~5 份样本的人工质量对照。** 没有数字的「感觉更准了」不进 dev。
 
 ## 6. 一次只改一层
 

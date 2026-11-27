@@ -4,6 +4,7 @@ import { bitableStatus, saveBitableSettings } from '../integrations/bitable.ts';
 import { bitableEventState, restartBitableEvents } from '../integrations/bitable-events.ts';
 import { isFeishuAppConfigured } from '../integrations/feishu.ts';
 import { badRequest } from '../lib/errors.ts';
+import { clearDemoRecords, seedDemoRecords } from '../services/bitable-demo.ts';
 import {
   APPLICATION_WRITABLE,
   APPLICATION_COLUMNS,
@@ -108,5 +109,18 @@ export async function bitableRoutes(app: import('fastify').FastifyInstance) {
         failed: flushed.failed,
       },
     };
+  });
+
+  /** 灌一批演示投递与面试，用来直观看同步效果；行 id 都带 seed_ 前缀，可一键清掉。 */
+  app.post('/api/settings/bitable/seed-demo', async (request) => {
+    const actor = requireAdmin(request);
+    const result = await seedDemoRecords(actor.id);
+    return { ok: true, data: result };
+  });
+
+  app.post('/api/settings/bitable/clear-demo', async (request) => {
+    const actor = requireAdmin(request);
+    const result = await clearDemoRecords(actor.id);
+    return { ok: true, data: result };
   });
 }

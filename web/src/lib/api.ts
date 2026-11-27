@@ -275,6 +275,10 @@ export const api = {
     request<AiResult<import("../workflowTypes").BitableReconcileResult>>("POST", "/settings/bitable/reconcile", {}),
   backfillBitable: () =>
     request<AiResult<import("../workflowTypes").BitableBackfillResult>>("POST", "/settings/bitable/backfill", {}),
+  seedBitableDemo: () =>
+    request<AiResult<import("../workflowTypes").BitableSeedResult>>("POST", "/settings/bitable/seed-demo", {}),
+  clearBitableDemo: () =>
+    request<AiResult<import("../workflowTypes").BitableClearResult>>("POST", "/settings/bitable/clear-demo", {}),
   asrConfig: () => request<AiResult<AsrConfig>>("GET", "/settings/asr"),
   saveAsrConfig: (input: { baseUrl: string; model: string; apiKey?: string; language?: string }) =>
     request<AiResult<AsrConfig>>("POST", "/settings/asr", input),

@@ -290,6 +290,43 @@ export async function applyBitableEvent(event: NormalizedEvent): Promise<{ appli
   return { applied, ignored, conflicts };
 }
 
+/**
+ * 单选列的事件回传的是选项 id（optXXXX），这里按缓存的选项表翻成文案；
+ * 文本列拍平成纯文本。返回空串表示这一格没有值。
+ */
+const OPTION_ID = /^opt[A-Za-z0-9]{4,}$/;
+
+let lastOptionSync = 0;
+
+/**
+ * 单选列的事件只带 option id。缓存缺失时（例如刚配好表、还没点过「检查表结构」）
+ * 现场拉一次字段列表补上，一分钟内最多补一次，避免每来一条事件都打飞书。
+ */
+async function ensureOptionCache(tableId: string): Promise<Record<string, Record<string, string>>> {
+  const config = storedBitableConfig();
+  if (!config.appToken) return config.options;
+  if (Object.keys(config.options).length) return config.options;
+  if (Date.now() - lastOptionSync < 60_000) return config.options;
+  lastOptionSync = Date.now();
+  const listed = await listBitableFields(config.appToken, tableId);
+  if (!listed.ok || !listed.data) return {};
+  const names: Record<string, string> = {};
+  const options: Record<string, Record<string, string>> = {};
+  for (const field of listed.data) {
+    names[field.fieldId] = field.fieldName;
+    if (Object.keys(field.options).length) options[field.fieldName] = field.options;
+  }
+  cacheFields(names, options);
+  return options;
+}
+
+function normalizeIncomingCell(config: { options: Record<string, Record<string, string>> }, column: string, value: unknown): string {
+  const text = readCellText(value);
+  if (!text) return '';
+  const optionName = config.options[column]?.[text];
+  return optionName ?? text;
+}
+
 async function applyAction(tableId: string, action: NormalizedAction): Promise<'applied' | 'ignored' | 'conflict'> {
   const entityType = entityTypeForTable(tableId);
   if (!entityType) return 'ignored';
@@ -302,12 +339,26 @@ async function applyAction(tableId: string, action: NormalizedAction): Promise<'
 
   const record = link.entity_type === 'interview' ? buildInterviewRecord(link.entity_id) : buildApplicationRecord(link.entity_id);
   if (!record) return 'ignored';
+  const config = storedBitableConfig();
 
   // 飞书会把我们自己推上去的改动也回推成事件：逐列比当前值，没变化的列直接跳过，
   // 既防住了自回声，也让重复事件变成无副作用。
-  const dirty = writableColumns(link.entity_type).filter(
-    (column) => column in action.fields && !sameCell(action.fields[column], record.fields[column]),
+  // 只在真的遇到选项 id 时才去补缓存，普通文本事件不额外发请求。
+  const needsOptions = writableColumns(link.entity_type).some(
+    (column) => column in action.fields && OPTION_ID.test(readCellText(action.fields[column])),
   );
+  const options = needsOptions ? await ensureOptionCache(tableId) : config.options;
+
+  const incoming = new Map<string, string>();
+  for (const column of writableColumns(link.entity_type)) {
+    if (!(column in action.fields)) continue;
+    const text = normalizeIncomingCell({ options }, column, action.fields[column]);
+    // 空单元格视为「没改动」：新增行的事件会把所有列都带上（值为空），
+    // 若把它当清空处理，会把系统里的值抹掉；自回声也会在这里被挡下。
+    if (!text) continue;
+    incoming.set(column, text);
+  }
+  const dirty = [...incoming.keys()].filter((column) => !sameCell(incoming.get(column), record.fields[column]));
   if (!dirty.length) return 'ignored';
 
   const operatorId = resolveOperatorId(action.operatorOpenId, link.entity_type, link.entity_id);
@@ -317,7 +368,7 @@ async function applyAction(tableId: string, action: NormalizedAction): Promise<'
     // 单个列写库失败（约束、并发）只记冲突，不能让整条事件抛出去打断长连接。
     let outcome: 'applied' | 'noop' | 'conflict' = 'conflict';
     try {
-      outcome = applyColumn(link.entity_type, link.entity_id, column, action.fields[column], operatorId);
+      outcome = applyColumn(link.entity_type, link.entity_id, column, incoming.get(column), operatorId);
     } catch {
       outcome = 'conflict';
     }
@@ -552,6 +603,7 @@ export async function testBitable(): Promise<BitableTestResult> {
   }
 
   const fieldCache: Record<string, string> = {};
+  const optionCache: Record<string, Record<string, string>> = {};
   for (const entityType of ['interview', 'application'] as const) {
     const tableId = tableFor(entityType);
     const label = entityType === 'interview' ? '面试表' : '投递表';
@@ -564,7 +616,10 @@ export async function testBitable(): Promise<BitableTestResult> {
       checks.push({ name: `${label}结构`, ok: false, message: listed.msg });
       continue;
     }
-    for (const field of listed.data) fieldCache[field.fieldId] = field.fieldName;
+    for (const field of listed.data) {
+      fieldCache[field.fieldId] = field.fieldName;
+      if (Object.keys(field.options).length) optionCache[field.fieldName] = field.options;
+    }
     const names = new Set(listed.data.map((field) => field.fieldName));
     const expected = Object.values(entityType === 'interview' ? INTERVIEW_COLUMNS : APPLICATION_COLUMNS);
     const missing = expected.filter((name) => !names.has(name));
@@ -574,7 +629,7 @@ export async function testBitable(): Promise<BitableTestResult> {
       message: missing.length === 0 ? `${expected.length} 列齐全` : `缺少列：${missing.join('、')}`,
     });
   }
-  if (Object.keys(fieldCache).length) cacheFields(fieldCache);
+  if (Object.keys(fieldCache).length) cacheFields(fieldCache, optionCache);
 
   const subscribed = await subscribeBitableFile(config.appToken);
   checks.push({

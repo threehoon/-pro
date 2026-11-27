@@ -12,7 +12,10 @@ export interface BitableStoredConfig {
   appToken: string | null;
   interviewsTableId: string | null;
   applicationsTableId: string | null;
+  /** field_id → 列名，用来把事件里的 field_id 翻译成列名。 */
   fields: Record<string, string>;
+  /** 列名 → { 选项 id → 选项名 }，单选列的事件回传的是 option id，不是文案。 */
+  options: Record<string, Record<string, string>>;
   enabled: boolean;
   fallbackMinutes: number;
 }
@@ -30,6 +33,7 @@ const EMPTY: BitableStoredConfig = {
   interviewsTableId: null,
   applicationsTableId: null,
   fields: {},
+  options: {},
   enabled: false,
   fallbackMinutes: 0,
 };
@@ -55,6 +59,39 @@ function readRow(): ConfigRow | undefined {
   );
 }
 
+function readCachedFields(raw: string): Record<string, string> {
+  const parsed = jsonParse<Record<string, unknown>>(raw, {});
+  const fields: Record<string, string> = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if (key !== '__options' && typeof value === 'string') fields[key] = value;
+  }
+  return fields;
+}
+
+function readCachedOptions(raw: string): Record<string, Record<string, string>> {
+  const parsed = jsonParse<Record<string, unknown>>(raw, {});
+  const stored = parsed.__options;
+  if (!stored || typeof stored !== 'object') return {};
+  const options: Record<string, Record<string, string>> = {};
+  for (const [column, map] of Object.entries(stored as Record<string, unknown>)) {
+    if (!map || typeof map !== 'object') continue;
+    const entries = Object.entries(map as Record<string, unknown>).filter(([, name]) => typeof name === 'string');
+    options[column] = Object.fromEntries(entries) as Record<string, string>;
+  }
+  return options;
+}
+
+function readFieldOptions(item: Record<string, unknown>): Record<string, string> {
+  const property = asRecord(item.property);
+  const options: Record<string, string> = {};
+  for (const option of asArray(property.options)) {
+    const optionId = String(option.id ?? '');
+    const name = String(option.name ?? '');
+    if (optionId && name) options[optionId] = name;
+  }
+  return options;
+}
+
 export function storedBitableConfig(): BitableStoredConfig {
   const row = readRow();
   if (!row) return EMPTY;
@@ -62,7 +99,8 @@ export function storedBitableConfig(): BitableStoredConfig {
     appToken: row.app_token,
     interviewsTableId: row.interviews_table_id,
     applicationsTableId: row.applications_table_id,
-    fields: jsonParse<Record<string, string>>(row.fields_json, {}),
+    fields: readCachedFields(row.fields_json),
+    options: readCachedOptions(row.fields_json),
     enabled: row.enabled === 1,
     fallbackMinutes: row.fallback_minutes,
   };
@@ -167,9 +205,17 @@ export function markReconciled(): void {
   run(`UPDATE bitable_config SET last_reconcile_at = ? WHERE id = 'default'`, [now()]);
 }
 
-export function cacheFields(fields: Record<string, string>): void {
+/**
+ * 缓存 field_id→列名与列名→选项表。单选列的事件回调只给 option id（optXXXX），
+ * 没有这张表就无法判断用户在表格里选的是「推荐」还是「淘汰」。
+ */
+export function cacheFields(fields: Record<string, string>, options?: Record<string, Record<string, string>>): void {
   const current = storedBitableConfig();
-  run(`UPDATE bitable_config SET fields_json = ? WHERE id = 'default'`, [toJson({ ...current.fields, ...fields })]);
+  const mergedOptions: Record<string, Record<string, string>> = { ...current.options };
+  for (const [column, map] of Object.entries(options ?? {})) mergedOptions[column] = { ...(mergedOptions[column] ?? {}), ...map };
+  run(`UPDATE bitable_config SET fields_json = ? WHERE id = 'default'`, [
+    toJson({ ...current.fields, ...fields, __options: mergedOptions }),
+  ]);
 }
 
 /* ------------------------------ 多维表格 REST ------------------------------ */
@@ -178,6 +224,7 @@ export interface BitableField {
   fieldId: string;
   fieldName: string;
   type: number;
+  options: Record<string, string>;
 }
 
 export interface BitableRecord {
@@ -211,6 +258,7 @@ export async function listBitableFields(appToken: string, tableId: string): Prom
           fieldId: String(item.field_id ?? ''),
           fieldName: String(item.field_name ?? ''),
           type: Number(item.type ?? 0),
+          options: readFieldOptions(item),
         }))
       : null,
   };
@@ -266,6 +314,27 @@ export async function updateBitableRecords(
     code: result.code,
     msg: result.msg || feishuReason(result.code, result.status),
     data: result.ok ? items : null,
+  };
+}
+
+export async function deleteBitableRecords(
+  appToken: string,
+  tableId: string,
+  recordIds: string[],
+): Promise<BitableCallResult<{ deleted: number }>> {
+  if (!recordIds.length) {
+    return { ok: true, status: 200, code: 0, msg: '没有要删除的行', data: { deleted: 0 } };
+  }
+  const result = await callFeishuTenantApi(tablePath(appToken, tableId, '/records/batch_delete'), {
+    method: 'POST',
+    payload: { records: recordIds },
+  });
+  return {
+    ok: result.ok,
+    status: result.status,
+    code: result.code,
+    msg: result.msg || feishuReason(result.code, result.status),
+    data: result.ok ? { deleted: recordIds.length } : null,
   };
 }
 

@@ -120,6 +120,21 @@ function SyncPanel({ config, onReload }: { config: BitableConfig; onReload: () =
     return `已排队 ${result.queued} 条，成功 ${result.pushed} 条，失败 ${result.failed} 条。`;
   });
 
+  const seedDemo = () => run("演示", async () => {
+    const result = requireAiResult(await api.seedBitableDemo(), "灌演示数据失败");
+    onReload();
+    return `已写入 ${result.applications} 条投递、${result.interviews} 条面试，推到表格 ${result.pushed} 行${result.failed ? `，失败 ${result.failed} 行` : ""}。`;
+  });
+
+  const clearDemo = () => {
+    if (!window.confirm("只删除带 seed_ 前缀的演示数据，真实数据不受影响。继续？")) return;
+    void run("清理", async () => {
+      const result = requireAiResult(await api.clearBitableDemo(), "清理演示数据失败");
+      onReload();
+      return `已删除库里 ${result.deleted} 行、表格里 ${result.remoteDeleted} 行${result.failed ? `，${result.failed} 行没删掉` : ""}。`;
+    });
+  };
+
   return <div className="workflow-stack">
     <div className="form-grid">
       <Field
@@ -165,6 +180,8 @@ function SyncPanel({ config, onReload }: { config: BitableConfig; onReload: () =
       <Button loading={busy === "检查"} disabled={!token.trim() || Boolean(busy)} onClick={() => void check()}>检查表结构</Button>
       <Button loading={busy === "对账"} disabled={!isOn || Boolean(busy)} onClick={() => void reconcile()}>立即对账</Button>
       <Button loading={busy === "推送"} disabled={!isOn || Boolean(busy)} onClick={() => void backfill()}>首次全量推送</Button>
+      <Button loading={busy === "演示"} disabled={!isOn || Boolean(busy)} onClick={() => void seedDemo()}>灌演示数据</Button>
+      <Button loading={busy === "清理"} disabled={Boolean(busy)} onClick={clearDemo}>清掉演示数据</Button>
     </div>
 
     {test && <ul className="bitable-checks">

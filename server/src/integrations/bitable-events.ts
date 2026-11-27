@@ -36,6 +36,10 @@ export interface StartResult {
 export function startBitableEvents(): StartResult {
   // 测试里不建长连接：会真的去连飞书并留下重连定时器，测试只需要 handleBitableEventForTest。
   if (process.env.NODE_ENV === 'test') return { started: false, reason: '测试环境不建长连接' };
+  // 同一个库被两个进程服务时，长连接只能有一个持有者，否则同一事件会被处理两遍。
+  if (process.env.HIRELOOP_BITABLE === 'off') {
+    return { started: false, reason: '本实例以 HIRELOOP_BITABLE=off 运行，同步交给另一个实例' };
+  }
   const config = storedBitableConfig();
   if (!config.enabled) return { started: false, reason: '多维表格同步没有开启' };
   if (!config.appToken) return { started: false, reason: '还没有填写 Base 的 app_token' };

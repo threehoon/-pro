@@ -244,6 +244,9 @@ export const api = {
   noShow: (id: string) => request<{ interview: Interview }>("POST", `/interviews/${id}/no-show`),
   syncInterviewCalendar: (id: string) =>
     request<import("../types").InterviewCalendarSyncResult>("POST", `/interviews/${id}/sync-calendar`, {}),
+  /** 打开面试详情时自动补同步：服务端判断该不该同步，重复调用不会重建日程。 */
+  ensureInterviewCalendar: (id: string) =>
+    request<import("../types").InterviewCalendarSyncResult>("POST", `/interviews/${id}/ensure-calendar`, {}),
 
   notifications: (options: { channel?: string; limit?: number } = {}) =>
     request<{ items: import("../types").NotificationItem[]; stats: Record<string, number> }>(

@@ -23,14 +23,19 @@ npm run dev           # API 8787 + 前端 5173
 
 | 文件 | 内容 |
 | --- | --- |
-| `server/src/services/ai/prompts.ts` | 提示词、统一约束、`PROMPT_VERSIONS` |
-| `server/src/services/recruitment-evidence.ts` | 输出校验与原文引用匹配 |
-| `web/src/pages/JobWorkspacePage.tsx` | 生成状态的展示 |
-| `web/src/components/workflow/*` | 画像、筛选、面试总结面板 |
+| `server/src/services/ai/prompts.ts` | 提示词文案、统一约束 `POLICY`、`PROMPT_VERSIONS` |
+| `server/src/services/recruitment-evidence.ts` | 模型输出的结构契约与硬校验（字段上限、`quote` 必须原文、禁用词、指标对齐） |
 
-**不要动**：`server/src/integrations/llm.ts`（传输与速度）、`server/src/services/recruitment-ai.ts`（队列、缓存、成本）、`server/src/db/*` 的加列顺序、`web/src/styles/*`。需要改就提 issue 或在 PR 里说，由框架侧改。
+分工调整（2026-11-27，第二次收敛）：你的范围就是这两个文件——**AI 提示词优化**。之前给你的 `JobWorkspacePage.tsx`、`components/workflow/*`、`routes/recruitment-ai.ts`、`resume-parser.ts` 已交回框架侧：界面、接口形状、调度与预算是框架的活，避免你改提示词时被界面和接口牵扯。
 
-分工调整（2026-11-27）：连接速度与缓存由框架侧负责，你专注提示词、输出结构与生成质量。
+**不要动**：`server/src/integrations/llm.ts`（传输与速度）、`server/src/services/recruitment-ai.ts`（队列、预算、缓存、成本）、`server/src/routes/recruitment-ai.ts`（接口形状）、`server/src/db/*` 的加列顺序、`web/src/**`。需要改就提 issue 或在 PR 里说，由框架侧改。
+
+改提示词时注意：
+
+- 版本号：改了文案或输出结构就把 `PROMPT_VERSIONS` 里对应项递增（如 `interview-summary-v2` → `v3`），这样 `ai_runs.prompt_version` 能把新旧结果分开对比，24h 缓存也会自然失效重算。
+- 加字段要和 `recruitment-evidence.ts` 的 zod schema 同步改，否则模型多给的字段会被丢掉、少给的字段会直接判失败。
+- `quote` 字段必须是原文逐字包含，否则 `validateSummary`/`validateScreening` 会丢弃该条证据——这是「不许编造」的底线，不要为了通过率放宽。
+- 一个 PR 只动一层（要么改文案，要么改校验），别混着提。
 
 ## 4. 从哪读起
 

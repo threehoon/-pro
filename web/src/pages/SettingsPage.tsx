@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError } from "../lib/api";
-import { fmtDateTime, timeAgo } from "../lib/format";
-import type { FeishuStatus, Meta, NotificationItem, SessionUser } from "../types";
+import { fmtDateTime } from "../lib/format";
+import type { FeishuOutboxDelivery, FeishuOutboxPage, FeishuOutboxStatus, FeishuStatus, Meta, NotificationItem, SessionUser } from "../types";
 import {
   Badge,
   Button,
@@ -16,30 +16,21 @@ import {
   useConfirm,
   useToast,
 } from "../components/ui";
-import { IconArrowUpRight, IconCheck } from "../components/icons";
+import { IconArrowUpRight, IconCheck, IconSearch } from "../components/icons";
 
 import { LlmSettings } from "../components/workflow/LlmSettings";
 
-const NOTIFY_STATUS: Record<string, { label: string; tone: "neutral" | "brand" | "warning" | "danger" }> = {
+const NOTIFY_STATUS: Record<FeishuOutboxStatus, { label: string; tone: "neutral" | "brand" | "warning" | "danger" }> = {
   pending: { label: "待发送", tone: "warning" },
   sent: { label: "已发送", tone: "brand" },
   failed: { label: "失败", tone: "danger" },
   skipped: { label: "已跳过", tone: "neutral" },
 };
 
-function parseNotificationDelivery(payload: string | null): { delivery: "dm" | "webhook"; recipientName: string | null } {
-  if (!payload) return { delivery: "webhook", recipientName: null };
-  try {
-    const parsed = JSON.parse(payload) as Record<string, unknown>;
-    return {
-      delivery: parsed.delivery === "dm" ? "dm" : "webhook",
-      recipientName:
-        typeof parsed.recipientName === "string" && parsed.recipientName.trim() ? parsed.recipientName.trim() : null,
-    };
-  } catch {
-    return { delivery: "webhook", recipientName: null };
-  }
-}
+const OUTBOX_PAGE_SIZE = 8;
+const OUTBOX_STATUSES = ["all", "pending", "sent", "failed", "skipped"] as const;
+type OutboxStatusFilter = (typeof OUTBOX_STATUSES)[number];
+type OutboxResult = { key: string } & ({ data: FeishuOutboxPage } | { error: string });
 
 export function SettingsPage({
   user,
@@ -60,9 +51,14 @@ export function SettingsPage({
   const [copiedCallback, setCopiedCallback] = useState(false);
   const [feishu, setFeishu] = useState<FeishuStatus | null>(null);
   const [feishuError, setFeishuError] = useState("");
-  const [notifications, setNotifications] = useState<NotificationItem[] | null>(null);
-  const [notifyStats, setNotifyStats] = useState<Record<string, number> | null>(null);
-  const [showAllNotifications, setShowAllNotifications] = useState(false);
+  const [notifyStatus, setNotifyStatus] = useState<OutboxStatusFilter>("all");
+  const [notifyDelivery, setNotifyDelivery] = useState<FeishuOutboxDelivery | "all">("all");
+  const [notifySearch, setNotifySearch] = useState("");
+  const [notifyPage, setNotifyPage] = useState(1);
+  const [notifyVersion, setNotifyVersion] = useState(0);
+  const [notifyResult, setNotifyResult] = useState<OutboxResult | null>(null);
+  const [lastOutboxPage, setLastOutboxPage] = useState<FeishuOutboxPage | null>(null);
+  const notifyResultsRef = useRef<HTMLDivElement>(null);
   const [outboxBusy, setOutboxBusy] = useState<"dispatch" | "skip" | null>(null);
   const [sendingId, setSendingId] = useState<string | null>(null);
   const [outboxNotice, setOutboxNotice] = useState("");
@@ -88,25 +84,45 @@ export function SettingsPage({
       .catch((err: unknown) => setFeishuError(err instanceof ApiError ? err.message : "飞书配置加载失败"));
   }, []);
 
-  const loadNotifications = useCallback(() => {
-    api
-      // 出站箱只看出站消息，不受站内提醒条数挤占
-      .notifications({ channel: "feishu", limit: 50 })
-      .then((data) => {
-        setNotifications(data.items);
-        setNotifyStats(data.stats);
-      })
-      .catch(() => {
-        setNotifications([]);
-        setNotifyStats(null);
+  const notifyQuery = notifySearch.trim();
+  const notifyKey = JSON.stringify([notifyStatus, notifyDelivery, notifyQuery, notifyPage, notifyVersion]);
+  const loadNotifications = useCallback(() => setNotifyVersion((value) => value + 1), []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      api.feishuOutbox({
+        limit: OUTBOX_PAGE_SIZE,
+        page: notifyPage,
+        status: notifyStatus === "all" ? undefined : notifyStatus,
+        delivery: notifyDelivery === "all" ? undefined : notifyDelivery,
+        q: notifyQuery,
+      }, controller.signal).then((data) => {
+        if (controller.signal.aborted) return;
+        setLastOutboxPage(data);
+        setNotifyResult({ key: notifyKey, data });
+      }).catch((err: unknown) => {
+        if (controller.signal.aborted) return;
+        setNotifyResult({ key: notifyKey, error: err instanceof ApiError ? err.message : "请稍后重试" });
       });
-  }, []);
+    }, notifyQuery ? 250 : 0);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [notifyStatus, notifyDelivery, notifyQuery, notifyPage, notifyKey]);
 
   useEffect(() => {
     loadTeam();
     loadFeishu();
-    loadNotifications();
-  }, [loadTeam, loadFeishu, loadNotifications]);
+  }, [loadTeam, loadFeishu]);
+
+  function clearOutboxFilters() {
+    setNotifyStatus("all");
+    setNotifyDelivery("all");
+    setNotifySearch("");
+    setNotifyPage(1);
+  }
 
   async function changeRole(member: SessionUser, role: string) {
     try {
@@ -219,10 +235,9 @@ export function SettingsPage({
   }
 
   async function skipAllPending() {
-    const pendingCount = notifyStats?.pending ?? feishu?.pendingNotifications ?? 0;
     const ok = await confirm({
-      title: `跳过当前 ${pendingCount} 条历史待发消息？`,
-      description: "这些历史记录会标记为「已跳过」并保留在列表中，避免首次接通机器人时把旧测试消息刷屏到飞书群；后续仍可按条手动重发。",
+      title: `跳过全部 ${pendingCount} 条历史待发消息？`,
+      description: "此操作不受搜索和筛选影响。待发记录将标记为「已跳过」并保留，避免接通机器人时一次发送旧消息；后续仍可按条手动重发。",
       confirmLabel: "跳过历史待发",
     });
     if (!ok) return;
@@ -236,12 +251,20 @@ export function SettingsPage({
     );
   }
 
+  const currentResult = notifyResult?.key === notifyKey ? notifyResult : null;
+  const outboxPage = currentResult && "data" in currentResult ? currentResult.data : null;
+  const notifyLoadError = currentResult && "error" in currentResult ? currentResult.error : null;
+  const notifyStats = lastOutboxPage?.stats;
   const pendingCount = notifyStats?.pending ?? feishu?.pendingNotifications ?? 0;
+  const failedCount = notifyStats?.failed ?? 0;
   const sendablePending = notifyStats?.sendablePending ?? 0;
   const sendableFailed = notifyStats?.sendableFailed ?? 0;
-  const failedCount = notifyStats?.failed ?? feishu?.failedNotifications ?? 0;
-  const sentCount = notifyStats?.sent ?? feishu?.sentNotifications ?? 0;
-  const skippedCount = notifyStats?.skipped ?? 0;
+  const totalCount = notifyStats ? notifyStats.pending + notifyStats.sent + notifyStats.failed + notifyStats.skipped : null;
+  const hasOutboxFilters = notifyStatus !== "all" || notifyDelivery !== "all" || Boolean(notifySearch);
+  const pageCount = Math.max(1, Math.ceil((lastOutboxPage?.total ?? 0) / OUTBOX_PAGE_SIZE));
+  const resultSummary = outboxPage?.items.length
+    ? `第 ${(outboxPage.page - 1) * OUTBOX_PAGE_SIZE + 1}–${(outboxPage.page - 1) * OUTBOX_PAGE_SIZE + outboxPage.items.length} 条，共 ${outboxPage.total} 条`
+    : outboxPage ? "共 0 条" : "";
 
   return (
     <div className="page page-narrow">
@@ -352,13 +375,11 @@ export function SettingsPage({
         )}
       </Card>
 
-      <Card className="settings-section">
+      <Card className="settings-section feishu-outbox" role="region" aria-labelledby="feishu-outbox-title">
         <header className="card-head">
           <div>
-            <h2>飞书出站箱</h2>
-            <p className="card-sub">
-              阶段流转与面试变更会自动异步推送群机器人卡片，已绑定飞书的面试官同时收到应用私信提醒；未配置或失败时留在这里，不影响招聘操作。
-            </p>
+            <h2 id="feishu-outbox-title">飞书出站箱</h2>
+            <p className="card-sub">查看阶段流转和面试变更发出的群通知与面试官私信。不影响招聘操作。</p>
           </div>
           <div className="notify-head-actions">
             {isAdmin && (sendablePending > 0 || sendableFailed > 0) && (
@@ -388,14 +409,58 @@ export function SettingsPage({
           </div>
         </header>
 
-        {notifyStats && (pendingCount > 0 || sentCount > 0 || failedCount > 0 || skippedCount > 0) && (
-          <div className="notify-stats muted">
-            <span>待发 {pendingCount}</span>
-            <span>已发 {sentCount}</span>
-            <span>失败 {failedCount}</span>
-            <span>已跳过 {skippedCount}</span>
-          </div>
+        {isAdmin && (pendingCount > 0 || sendableFailed > 0) && (
+          <p className="muted notify-scope">批量补发和跳过处理的是整个出站箱，不受下方筛选影响。</p>
         )}
+
+        <div className="notify-stats" role="group" aria-label="发送状态（数字为全箱记录数）">
+          {OUTBOX_STATUSES.map((value) => (
+            <button
+              key={value}
+              type="button"
+              className="notify-status-filter"
+              aria-pressed={notifyStatus === value}
+              onClick={() => { setNotifyStatus(value); setNotifyPage(1); }}
+            >
+              {value === "all" ? "全部" : NOTIFY_STATUS[value].label}
+              <span className="notify-status-count">{(value === "all" ? totalCount : notifyStats?.[value]) ?? "—"}</span>
+            </button>
+          ))}
+        </div>
+
+        <div className="notify-tools">
+          <Field label="搜索通知">
+            {(id) => (
+              <div className="search-input notify-search">
+                <IconSearch size={16} aria-hidden="true" />
+                <Input
+                  id={id}
+                  type="search"
+                  maxLength={100}
+                  value={notifySearch}
+                  placeholder="候选人、面试官或职位"
+                  onChange={(event) => { setNotifySearch(event.target.value); setNotifyPage(1); }}
+                />
+              </div>
+            )}
+          </Field>
+          <Field label="发送渠道">
+            {(id) => (
+              <Select id={id} value={notifyDelivery} onChange={(event) => {
+                const delivery = event.target.value;
+                setNotifyDelivery(delivery === "dm" || delivery === "webhook" ? delivery : "all");
+                setNotifyPage(1);
+              }}>
+                <option value="all">全部渠道</option>
+                <option value="webhook">群机器人</option>
+                <option value="dm">面试官私信</option>
+              </Select>
+            )}
+          </Field>
+          <Button size="sm" aria-disabled={!hasOutboxFilters} onClick={() => {
+            if (hasOutboxFilters) clearOutboxFilters();
+          }}>清空筛选</Button>
+        </div>
 
         {outboxError && (
           <p className="form-error notify-banner" role="alert">
@@ -408,67 +473,81 @@ export function SettingsPage({
           </p>
         )}
 
-        {!notifications && <ListSkeleton rows={3} />}
-        {notifications && notifications.length === 0 && (
-          <EmptyState title="还没有飞书出站记录" description="推进候选人阶段或安排面试后，这里会出现对应的飞书卡片推送记录。" />
-        )}
-        {notifications && notifications.length > 0 && (
-          <ul className="notify-list">
-            {(showAllNotifications ? notifications : notifications.slice(0, 5)).map((item) => {
-              const status = NOTIFY_STATUS[item.status] ?? { label: item.status, tone: "neutral" as const };
-              const { delivery, recipientName } = parseNotificationDelivery(item.payload);
-              const deliveryReady = delivery === "dm" ? Boolean(feishu?.ready.login) : Boolean(feishu?.ready.notifications);
-              const canSend = isAdmin && item.status !== "sent";
-              const actionLabel = item.status === "failed" ? "重试" : item.status === "skipped" ? "重发" : "发送";
-              return (
-                <li key={item.id}>
-                  <div>
-                    <strong>{item.title}</strong>
-                    <span className="muted">
-                      {item.body ? `${item.body} · ` : ""}
-                      {timeAgo(item.created_at)}
-                    </span>
-                    {item.last_error && (
-                      <span className={item.status === "failed" ? "notify-error" : "notify-skip-note"}>
-                        {item.status === "failed" ? `失败原因：${item.last_error}` : item.last_error}
+        <div ref={notifyResultsRef} className="notify-results" role="group" aria-label="出站记录结果" aria-busy={!currentResult} tabIndex={-1}>
+          {!currentResult && <ListSkeleton rows={3} />}
+          {notifyLoadError && (
+            <ErrorState message={`出站记录加载失败：${notifyLoadError}`} onRetry={() => {
+              notifyResultsRef.current?.focus({ preventScroll: true });
+              loadNotifications();
+            }} />
+          )}
+          {outboxPage?.items.length === 0 && (totalCount === 0 ? (
+            <EmptyState compact title="还没有飞书出站记录" description="推进候选人阶段或安排面试后，这里会出现发送记录。" />
+          ) : (
+            <EmptyState compact title="没有符合条件的记录" description="试试缩短姓名关键词，或清空筛选查看全部记录。" />
+          ))}
+          {outboxPage && outboxPage.items.length > 0 && (
+            <ul className="notify-list" aria-label="飞书发送记录">
+              {outboxPage.items.map((item) => {
+                const status = NOTIFY_STATUS[item.status];
+                const isDm = item.delivery === "dm";
+                const deliveryReady = isDm ? Boolean(feishu?.ready.login) : Boolean(feishu?.ready.notifications);
+                const canSend = isAdmin && item.status !== "sent";
+                const actionLabel = item.status === "failed" ? "重试" : item.status === "skipped" ? "重发" : "发送";
+                const interviewer = item.interviewer_name ? `面试官：${item.interviewer_name}` : "";
+                const detail = [item.body, interviewer && !item.body?.includes(interviewer) ? interviewer : null].filter(Boolean).join(" · ");
+                return (
+                  <li key={item.id}>
+                    <div className="notify-message">
+                      <strong>{item.title}</strong>
+                      {detail && <span className="muted">{detail}</span>}
+                      {item.last_error && (
+                        <span className={item.status === "failed" ? "notify-error" : "notify-skip-note"}>
+                          {item.status === "failed" ? `失败原因：${item.last_error}` : item.last_error}
+                        </span>
+                      )}
+                    </div>
+                    <div className="notify-meta">
+                      <div className="notify-row-labels">
+                        <Badge tone={status.tone}>{status.label}</Badge>
+                        <Badge tone="neutral">{isDm ? "面试官私信" : "群机器人"}</Badge>
+                      </div>
+                      <span className="notify-time muted">
+                        {item.sent_at ? "发送于" : "创建于"} {fmtDateTime(item.sent_at ?? item.created_at)}
+                        {item.status === "failed" && item.attempts > 0 && ` · 已尝试 ${item.attempts} 次`}
                       </span>
-                    )}
-                  </div>
-                  <div className="notify-meta">
-                    <Badge tone={delivery === "dm" ? "brand" : "neutral"}>
-                      {delivery === "dm" ? (recipientName ? `私信 · ${recipientName}` : "面试官私信") : "群机器人"}
-                    </Badge>
-                    <Badge tone={status.tone}>{status.label}</Badge>
-                    {item.status === "failed" && item.attempts > 0 && (
-                      <span className="muted">第 {item.attempts} 次</span>
-                    )}
-                    {item.sent_at && <span className="muted">{fmtDateTime(item.sent_at)}</span>}
+                    </div>
                     {canSend && (
                       <Button
                         size="sm"
                         loading={sendingId === item.id}
-                        disabled={!deliveryReady || outboxBusy !== null || (sendingId !== null && sendingId !== item.id)}
+                        disabled={!deliveryReady || outboxBusy !== null || sendingId !== null}
                         onClick={() => void dispatchSingle(item)}
                       >
                         {actionLabel}
                       </Button>
                     )}
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        )}
-        {notifications && notifications.length > 5 && (
-          <div className="notify-more">
-            <Button size="sm" onClick={() => setShowAllNotifications((value) => !value)}>
-              {showAllNotifications ? "只看最近 5 条" : `展开全部 ${notifications.length} 条`}
-            </Button>
-            <span className="muted">
-              当前列出最近 {notifications.length} 条记录，按时间倒序展示。
-            </span>
-          </div>
-        )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+
+        <footer className="notify-footer">
+          <span className="muted" role="status">{resultSummary || (!currentResult ? "正在加载记录…" : "")}</span>
+          {pageCount > 1 && (
+            <nav className="notify-pages" aria-label="出站记录分页">
+              <Button size="sm" aria-disabled={!outboxPage || outboxPage.page <= 1} onClick={() => {
+                if (outboxPage && outboxPage.page > 1) setNotifyPage(outboxPage.page - 1);
+              }}>上一页</Button>
+              <span className="muted">{outboxPage?.page ?? Math.min(notifyPage, pageCount)} / {pageCount}</span>
+              <Button size="sm" aria-disabled={!outboxPage || outboxPage.page >= pageCount} onClick={() => {
+                if (outboxPage && outboxPage.page < pageCount) setNotifyPage(outboxPage.page + 1);
+              }}>下一页</Button>
+            </nav>
+          )}
+        </footer>
       </Card>
 
       <Card className="settings-section">

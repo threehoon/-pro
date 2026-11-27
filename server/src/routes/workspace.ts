@@ -27,6 +27,7 @@ import {
 } from '../integrations/feishu.ts';
 import {
   dispatchFeishuOutbox,
+  listFeishuOutbox,
   listNotifications,
   notificationStats,
   skipPendingFeishuNotifications,
@@ -70,14 +71,18 @@ export async function workspaceRoutes(app: FastifyInstance) {
     const query = z.object({
       channel: z.enum(['inapp', 'feishu', 'email']).optional(),
       limit: z.coerce.number().int().min(1).max(100).optional(),
+      page: z.coerce.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+      status: z.enum(['pending', 'sent', 'failed', 'skipped']).optional(),
+      delivery: z.enum(['webhook', 'dm']).optional(),
+      q: z.string().trim().max(100).optional(),
     });
     const parsed = query.safeParse(request.query);
     if (!parsed.success) throw badRequest('查询参数不合法', parsed.error.flatten());
-    const { channel, limit } = parsed.data;
-    return {
-      items: listNotifications(limit ?? 30, channel),
-      stats: notificationStats(channel),
-    };
+    const { channel, limit, ...filters } = parsed.data;
+    if (channel === 'feishu') {
+      return { ...listFeishuOutbox({ ...filters, limit }), stats: notificationStats(channel) };
+    }
+    return { items: listNotifications(limit ?? 30, channel), stats: notificationStats(channel) };
   });
 
   app.get('/api/settings/feishu', async (request) => {

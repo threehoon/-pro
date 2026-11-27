@@ -214,6 +214,9 @@ function enqueueInterviewEventChannels(input: {
   basePayload: Record<string, unknown>;
 }): string[] {
   const feishuIds: string[] = [];
+  const interviewerName = input.interviewerId
+    ? getRow<{ name: string }>('SELECT name FROM users WHERE id = ?', [input.interviewerId])?.name ?? null
+    : null;
 
   enqueueNotification({
     eventKey: input.eventKey,
@@ -235,6 +238,7 @@ function enqueueInterviewEventChannels(input: {
     payload: {
       delivery: 'webhook',
       ...input.basePayload,
+      interviewerName,
       actorId: input.actorId,
     },
   });
@@ -625,6 +629,48 @@ export function listNotifications(limit = 30, channel?: string): NotificationRow
     );
   }
   return all<NotificationRow>('SELECT * FROM notifications ORDER BY created_at DESC, rowid DESC LIMIT ?', [limit]);
+}
+
+export function listFeishuOutbox(options: {
+  limit?: number;
+  page?: number;
+  status?: NotificationStatus;
+  delivery?: FeishuDeliveryKind;
+  q?: string;
+}) {
+  const { limit = 30, page = 1, status, delivery, q } = options;
+  const where = ["n.channel = 'feishu'"];
+  const params: string[] = [];
+  // Legacy records lacked a delivery marker. Match the list's group/DM distinction.
+  const payload = "CASE WHEN json_valid(n.payload) THEN n.payload ELSE '{}' END";
+  const deliveryKind = `CASE WHEN json_extract(${payload}, '$.delivery') = 'dm' THEN 'dm' ELSE 'webhook' END`;
+  const recipient = `NULLIF(trim(json_extract(${payload}, '$.recipientName')), '')`;
+  const interviewer = `COALESCE(NULLIF(trim(json_extract(${payload}, '$.interviewerName')), ''), ${recipient}, u.name)`;
+  if (status) {
+    where.push('n.status = ?');
+    params.push(status);
+  }
+  if (delivery) {
+    where.push(`${deliveryKind} = ?`);
+    params.push(delivery);
+  }
+  if (q) {
+    const fields = ['n.title', 'n.body', `json_extract(${payload}, '$.candidateName')`, `json_extract(${payload}, '$.jobTitle')`, interviewer];
+    // Literal substring search: '%' and '_' are part of the input, not wildcards.
+    where.push(`(${fields.map((field) => `instr(lower(${field}), lower(?)) > 0`).join(' OR ')})`);
+    params.push(...fields.map(() => q));
+  }
+  const from = `FROM notifications AS n
+    LEFT JOIN users AS u ON n.type IN ('interview.scheduled', 'interview.cancelled') AND u.id = n.target_user_id
+    WHERE ${where.join(' AND ')}`;
+  const total = getRow<{ n: number }>(`SELECT COUNT(*) AS n ${from}`, params)!.n;
+  const currentPage = Math.min(page, Math.max(1, Math.ceil(total / limit)));
+  const items = all<NotificationRow & { delivery: FeishuDeliveryKind; interviewer_name: string | null }>(
+    `SELECT n.*, ${deliveryKind} AS delivery, ${interviewer} AS interviewer_name ${from}
+     ORDER BY n.created_at DESC, n.rowid DESC LIMIT ? OFFSET ?`,
+    [...params, limit, (currentPage - 1) * limit],
+  );
+  return { items, total, page: currentPage };
 }
 
 function eligibleDeliveryPredicate(webhook: boolean, dm: boolean): string {

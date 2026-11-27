@@ -406,6 +406,20 @@ export interface FeishuSkipResult {
   remainingPending: number;
 }
 
+export type FeishuOutboxStatus = "pending" | "sent" | "failed" | "skipped";
+export type FeishuOutboxDelivery = "webhook" | "dm";
+
+export interface FeishuOutboxPage {
+  items: Array<NotificationItem & {
+    status: FeishuOutboxStatus;
+    delivery: FeishuOutboxDelivery;
+    interviewer_name: string | null;
+  }>;
+  stats: Record<FeishuOutboxStatus, number> & { sendablePending: number; sendableFailed: number };
+  total: number;
+  page: number;
+}
+
 export interface NotificationItem {
   id: string;
   event_key: string;

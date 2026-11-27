@@ -5,6 +5,9 @@ import type {
   CandidateDetail,
   CandidateList,
   DashboardData,
+  FeishuOutboxDelivery,
+  FeishuOutboxPage,
+  FeishuOutboxStatus,
   FeishuStatus,
   Interview,
   JobDetail,
@@ -41,12 +44,13 @@ async function request<T>(
   method: string,
   path: string,
   body?: unknown,
-  opts: { form?: FormData } = {},
+  opts: { form?: FormData; signal?: AbortSignal } = {},
 ): Promise<T> {
   const init: RequestInit = {
     method,
     credentials: "same-origin",
     headers: {},
+    signal: opts.signal,
   };
   if (opts.form) {
     init.body = opts.form;
@@ -246,6 +250,10 @@ export const api = {
       "GET",
       `/notifications${qs({ channel: options.channel, limit: options.limit })}`,
     ),
+  feishuOutbox: (
+    filters: { limit: number; page: number; status?: FeishuOutboxStatus; delivery?: FeishuOutboxDelivery; q?: string },
+    signal?: AbortSignal,
+  ) => request<FeishuOutboxPage>("GET", `/notifications${qs({ channel: "feishu", ...filters })}`, undefined, { signal }),
   llmConfig: () => request<AiResult<LlmConfig>>("GET", "/settings/llm"),
   saveLlmConfig: (input: { baseUrl: string; model: string; apiKey?: string }) =>
     request<AiResult<LlmConfig>>("POST", "/settings/llm", input),

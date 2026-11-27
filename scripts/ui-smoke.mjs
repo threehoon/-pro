@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { once } from 'node:events';
+import { DatabaseSync } from 'node:sqlite';
 
 // 默认自带一套隔离数据（临时目录 + 自有端口），跑完即删，不污染演示库。
 // 想在已有服务上跑：SMOKE_BASE=http://127.0.0.1:8787 npm run smoke
@@ -34,6 +35,18 @@ if (!EXTERNAL) {
   const env = { ...process.env, HIRELOOP_DATA_DIR: dataDir, HIRELOOP_DB_PATH: join(dataDir, 'app.db'), LLM_API_KEY: '', PORT: APP_PORT, NODE_ENV: 'production' };
   const seed = spawnSync('node', ['server/src/db/seed.ts'], { env, stdio: 'inherit' });
   if (seed.status !== 0) throw new Error('隔离数据初始化失败');
+  const fixtureDb = new DatabaseSync(env.HIRELOOP_DB_PATH);
+  try {
+    const insert = fixtureDb.prepare(`INSERT INTO notifications
+      (id, event_key, type, channel, status, title, payload, created_at)
+      VALUES (?, ?, 'interview.scheduled', 'feishu', 'pending', ?, ?, '2090-01-01T00:00:00.000Z')`);
+    for (let i = 0; i < 10; i++) {
+      const key = `smoke-outbox-${i}`;
+      insert.run(key, key, `筛选样本 ${i}`, JSON.stringify({ interviewerName: i === 0 ? '早期记录面试官' : '样本面试官' }));
+    }
+  } finally {
+    fixtureDb.close();
+  }
   server = spawn('node', ['server/src/index.ts'], { env, stdio: 'ignore' });
   let up = false;
   for (let i = 0; i < 80; i += 1) {
@@ -763,6 +776,32 @@ check('DeepSeek 文档与密钥链接指向官方并在新标签打开', await e
     .every(url => panel?.querySelector('a[target="_blank"][href="' + url + '"]')?.relList.contains('noreferrer'));
 })()`));
 check('未配置 AI 模型时禁用连通性测试', await ev(`Boolean([...document.querySelectorAll('button')].find(b => b.textContent.trim() === '测试连通性')?.disabled)`));
+if (!EXTERNAL) {
+  const outbox = `document.querySelector('.feishu-outbox')`;
+  await waitFor(`${outbox}?.querySelectorAll('.notify-list li').length === 8`, '出站箱第一页');
+  await click('下一页', '.feishu-outbox');
+  await waitFor(`${outbox}.querySelector('.notify-footer [role=status]').textContent.includes('第 9')`, '出站箱下一页');
+  check('翻页可看到首屏以外的历史记录', await ev(`${outbox}.querySelector('.notify-list').textContent.includes('筛选样本 0')`));
+  await ev(`${outbox}.querySelectorAll('.notify-status-filter')[1].click()`);
+  await field('发送渠道', 'webhook', '.feishu-outbox');
+  await field('搜索通知', '早期记录面试官', '.feishu-outbox');
+  await waitFor(`${outbox}.querySelector('.notify-list li')?.textContent.includes('早期记录面试官')`, '组合搜索找到历史面试官');
+  check('出站箱可组合筛选状态、渠道与面试官', await ev(`
+    ${outbox}.querySelectorAll('.notify-list li').length === 1
+    && ${outbox}.querySelector('.notify-list li').textContent.includes('待发送')
+    && ${outbox}.querySelector('.notify-status-filter[aria-pressed=true]').textContent.startsWith('待发送')
+  `));
+  await field('搜索通知', '没有对应的出站记录_abcdef', '.feishu-outbox');
+  await waitFor(`${outbox}.querySelector('.empty-state h3')?.textContent === '没有符合条件的记录'`, '搜索没有结果');
+  await click('清空筛选', '.feishu-outbox');
+  await waitFor(`${outbox}.querySelectorAll('.notify-list li').length === 8`, '清空筛选后恢复出站箱列表');
+  check('清空可恢复全部状态、渠道和第一页', await ev(`
+    ${outbox}.querySelector('.notify-status-filter[aria-pressed=true]').textContent.startsWith('全部')
+    && ${outbox}.querySelector('select').value === 'all'
+    && ${outbox}.querySelector('input[type=search]').value === ''
+    && ${outbox}.querySelector('.notify-footer [role=status]').textContent.startsWith('第 1–8 条')
+  `));
+}
 await capture('settings', 390, '.settings-section');
 await capture('settings', 1440, '.settings-section');
 // 一级导航五项、旧地址书签

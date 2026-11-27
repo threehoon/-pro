@@ -45,6 +45,67 @@ test('注册首个用户成为管理员并自动登录', async () => {
   cookie = String(setCookie).split(';')[0]!;
 });
 
+test('飞书出站箱按状态、渠道和人员过滤完整历史后分页，统计仍按全箱计算', async () => {
+  const user = getRow<{ id: string }>('SELECT id FROM users WHERE email = ?', ['qa@hireloop.cn']);
+  assert.ok(user);
+  function insert(key: string, status: string, payload: string, title: string, createdAt: string, channel = 'feishu', type = 'interview.scheduled') {
+    run(`INSERT INTO notifications (id, event_key, type, channel, status, target_user_id, title, payload, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, [key, `outbox-test:${key}`, type, channel, status, user!.id, title, payload, createdAt]);
+  }
+  async function query(params = '') {
+    const res = await app.inject({ url: `/api/notifications?channel=feishu${params}`, headers: authHeaders() });
+    assert.equal(res.statusCode, 200);
+    return res.json();
+  }
+  const archived = '2025-01-01T00:00:00.000Z';
+  const recent = '2026-01-01T00:00:00.000Z';
+  try {
+    insert('p-old', 'pending', JSON.stringify({ candidateName: '赵旧记录', jobTitle: 'C++ 工程师' }), '旧面试', archived);
+    insert('s-old', 'sent', '{bad', '旧记录含 100% 匹配', archived);
+    insert('s-notliteral', 'sent', '{}', '旧记录含 100 分匹配', archived);
+    insert('s-dm', 'sent', JSON.stringify({ delivery: 'dm', recipientName: '苏面试官' }), '改期通知', recent);
+    insert('s-group', 'sent', JSON.stringify({ delivery: 'webhook', interviewerName: '苏面试官' }), '取消通知', recent, 'feishu', 'interview.cancelled');
+    insert('stage', 'skipped', '{}', '阶段通知', recent, 'feishu', 'stage.changed');
+    insert('other', 'sent', JSON.stringify({ delivery: 'dm', recipientName: '苏面试官' }), '邮件通知', recent, 'email');
+    for (let i = 0; i < 60; i++) insert(`p-${i}`, 'pending', '{}', `当前面试 ${i}`, recent);
+
+    const first = await query('&limit=8');
+    assert.equal(first.total, 66);
+    assert.deepEqual(first.items.slice(0, 2).map((row: { id: string }) => row.id), ['p-59', 'p-58']);
+    const second = await query('&limit=8&page=2');
+    assert.equal(second.page, 2);
+    assert.equal(second.items[0].id, 'p-51');
+    const pastEnd = await query('&limit=8&page=999');
+    assert.equal(pastEnd.page, 9);
+    assert.equal(pastEnd.items.length, 2);
+
+    const dm = await query(`&status=sent&delivery=dm&q=${encodeURIComponent(' 苏面试官 ')}`);
+    assert.equal(dm.total, 1);
+    assert.equal(dm.items[0].id, 's-dm');
+    assert.equal(dm.items[0].interviewer_name, '苏面试官');
+    assert.deepEqual(dm.stats, first.stats);
+    const webhook = await query(`&status=sent&delivery=webhook&q=${encodeURIComponent('苏面试官')}`);
+    assert.deepEqual(webhook.items.map((row: { id: string }) => row.id), ['s-group']);
+    const older = await query(`&limit=1&status=pending&delivery=webhook&q=${encodeURIComponent('赵旧记录')}`);
+    assert.equal(older.items[0].id, 'p-old');
+    assert.equal(older.items[0].interviewer_name, '测试招聘官');
+    assert.equal((await query(`&q=${encodeURIComponent('c++')}`)).total, 1);
+    assert.equal((await query(`&q=${encodeURIComponent('100%')}`)).items[0].id, 's-old');
+    assert.equal((await query(`&q=${encodeURIComponent('100%')}`)).total, 1);
+    assert.equal((await query(`&status=skipped&q=${encodeURIComponent('测试招聘官')}`)).total, 0);
+    assert.equal((await query('&status=failed')).total, 0);
+
+    const unscoped = await app.inject({ url: '/api/notifications?limit=1', headers: authHeaders() });
+    assert.deepEqual(Object.keys(unscoped.json()).sort(), ['items', 'stats']);
+    for (const query of ['page=0', 'status=nope', 'delivery=nope', `q=${'a'.repeat(101)}`]) {
+      assert.equal((await app.inject({ url: `/api/notifications?channel=feishu&${query}`, headers: authHeaders() })).statusCode, 400);
+    }
+    assert.equal((await app.inject({ url: '/api/notifications?channel=feishu' })).statusCode, 401);
+  } finally {
+    run("DELETE FROM notifications WHERE event_key LIKE 'outbox-test:%'");
+  }
+});
+
 test('设置了账号名之后可以用账号名登录，邮箱也仍然可用', async () => {
   const row = getRow<{ id: string }>('SELECT id FROM users WHERE email = ?', ['qa@hireloop.cn']);
   assert.ok(row);

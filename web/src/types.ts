@@ -227,6 +227,8 @@ export interface Interview {
   meeting_url: string | null;
   interviewer_id: string | null;
   interviewer_name: string | null;
+  /** 面试官是否已绑定飞书：没绑定时日程只会写进招聘日历，不会给面试官发邀请 */
+  interviewer_feishu_bound?: number | null;
   status: InterviewStatus;
   external_calendar_event_id?: string | null;
   calendar_sync_status?: CalendarSyncStatus;

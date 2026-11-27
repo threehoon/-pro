@@ -3231,6 +3231,13 @@ a.status-chip-more:hover {
   margin: 0;
 }
 
+.interview-sync-hint {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: var(--fs-12);
+  line-height: 1.5;
+}
+
 .agenda-feedback {
   flex-basis: 100%;
   margin-top: 2px;

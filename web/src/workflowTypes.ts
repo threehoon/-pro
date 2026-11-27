@@ -294,3 +294,16 @@ export interface BitableBackfillResult {
   pushed: number;
   failed: number;
 }
+
+export interface BitableSeedResult {
+  applications: number;
+  interviews: number;
+  pushed: number;
+  failed: number;
+}
+
+export interface BitableClearResult {
+  deleted: number;
+  remoteDeleted: number;
+  failed: number;
+}

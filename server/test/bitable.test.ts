@@ -39,6 +39,16 @@ const APPLICATION_COLUMNS = [
   '综合结论', '下一步', '下次跟进', '备注', '最后同步',
 ];
 
+/** 单选列在事件里回传的是选项 id，这里给每列造一组固定选项，用来验证 id→文案 的翻译。 */
+const SELECT_OPTIONS: Record<string, Array<{ id: string; name: string }>> = {
+  结论: [{ id: 'opt_rec_yes', name: '推荐' }, { id: 'opt_rec_no', name: '不推荐' }],
+  是否推荐进复试: [{ id: 'opt_adv_yes', name: '推荐' }, { id: 'opt_adv_hold', name: '待定' }],
+  本轮决定: [{ id: 'opt_dec_advance', name: '进下一轮' }],
+  面试状态: [{ id: 'opt_status_scheduled', name: '待进行' }],
+  阶段: [{ id: 'opt_stage_screening', name: '筛选中' }, { id: 'opt_stage_interview', name: '面试中' }],
+  是否淘汰: [{ id: 'opt_rej_yes', name: '是' }, { id: 'opt_rej_no', name: '否' }],
+};
+
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -65,7 +75,14 @@ function feishuStub(input: string | URL, init?: { method?: string; body?: string
     return Promise.resolve(jsonResponse({
       code: 0,
       msg: 'ok',
-      data: { items: names.map((name, index) => ({ field_id: `fld${index}`, field_name: name, type: 1 })) },
+      data: {
+        items: names.map((name, index) => ({
+          field_id: `fld${index}`,
+          field_name: name,
+          type: SELECT_OPTIONS[name] ? 3 : 1,
+          property: SELECT_OPTIONS[name] ? { options: SELECT_OPTIONS[name] } : undefined,
+        })),
+      },
     }));
   }
   if (url.includes('/records/batch_create')) {
@@ -81,6 +98,11 @@ function feishuStub(input: string | URL, init?: { method?: string; body?: string
     const records = (body as { records: Array<{ record_id: string; fields: Record<string, unknown> }> }).records;
     for (const record of records) remoteRecords.set(record.record_id, record.fields);
     return Promise.resolve(jsonResponse({ code: 0, msg: 'ok', data: { records } }));
+  }
+  if (url.includes('/records/batch_delete')) {
+    const ids = (body as { records: string[] }).records;
+    for (const id of ids) remoteRecords.delete(id);
+    return Promise.resolve(jsonResponse({ code: 0, msg: 'ok', data: { records: ids.map((id) => ({ record_id: id, deleted: true })) } }));
   }
   if (url.includes('/records')) {
     return Promise.resolve(jsonResponse({
@@ -303,25 +325,43 @@ test('多维表格入站：表格里的结论、评分、进复试会回写，�
         record_id: interviewRow.record_id,
         action: 'edit',
         after_value: [
-          { field_key: '结论', field_value: '推荐' },
+          // 飞书真实回调给的是选项 id，不是文案；文本列给的是被序列化的富文本片段。
+          { field_key: '结论', field_value: 'opt_rec_yes' },
           { field_key: '评分（1-5）', field_value: 5 },
-          { field_key: '是否推荐进复试', field_value: '推荐' },
+          { field_key: '是否推荐进复试', field_value: 'opt_adv_yes' },
+          { field_key: '补充反馈', field_value: '[{"text":"表格里写的补充反馈","type":"text"}]' },
         ],
       }],
     },
   });
   assert.equal(applied?.applied, 1);
 
-  const written = getRow<{ recommendation: string; score: number; advance_recommended: string }>(
-    'SELECT recommendation, score, advance_recommended FROM interviews WHERE id = ?',
+  const written = getRow<{ recommendation: string; score: number; advance_recommended: string; feedback: string }>(
+    'SELECT recommendation, score, advance_recommended, feedback FROM interviews WHERE id = ?',
     [interviewId],
   );
   assert.equal(written?.recommendation, 'yes');
   assert.equal(written?.score, 5);
   assert.equal(written?.advance_recommended, 'yes');
+  // 富文本片段要被拍平成纯文本，不能把 [{"text":…}] 这串 JSON 写进库里。
+  assert.equal(written?.feedback, '表格里写的补充反馈');
   assert.equal(
     getRow<{ n: number }>("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'bitable.writeback'")?.n,
-    3,
+    4,
+  );
+
+  // 空单元格不能当成「清空」：新增行的事件会把所有列带上来，值为空。
+  const blank = await handleBitableEventForTest({
+    header: { event_id: 'evt_writeback_blank' },
+    event: {
+      table_id: 'tblinterview',
+      action_list: [{ record_id: interviewRow.record_id, action: 'edit', after_value: [{ field_key: '补充反馈', field_value: '' }] }],
+    },
+  });
+  assert.equal(blank?.applied, 0);
+  assert.equal(
+    getRow<{ feedback: string }>('SELECT feedback FROM interviews WHERE id = ?', [interviewId])?.feedback,
+    '表格里写的补充反馈',
   );
 
   // 同样的值再来一次：系统刚推回去，应该识别成自己的回声而不是再写一遍。
@@ -380,4 +420,59 @@ test('多维表格入站：表格里的结论、评分、进复试会回写，�
     1,
   );
   await flushBitableQueue(1);
+});
+
+test('富文本单元格按纯文本解析，嵌套的序列化片段不会一层层套下去', async () => {
+  const { readCellText } = await import('../src/services/bitable-mapping.ts');
+  assert.equal(readCellText('[{"text":"一句话反馈","type":"text"}]'), '一句话反馈');
+  // 真实发生时是「片段里又装了一段被序列化的片段」，要一路剥到纯文本。
+  const nested = JSON.stringify([{ text: JSON.stringify([{ text: '再套一层', type: 'text' }]), type: 'text' }]);
+  assert.equal(readCellText(nested), '再套一层');
+  assert.equal(readCellText([{ text: '第一段', type: 'text' }, { text: '第二段', type: 'text' }]), '第一段第二段');
+  assert.equal(readCellText(''), '');
+  assert.equal(readCellText('普通文本'), '普通文本');
+});
+
+test('演示数据：一键灌入可清空，清理时同时删掉表格里的行', async () => {
+  const seeded = await app.inject({ method: 'POST', url: '/api/settings/bitable/seed-demo', headers: { cookie: adminCookie } });
+  assert.equal(seeded.statusCode, 200);
+  const result = seeded.json().data as { applications: number; interviews: number; pushed: number; failed: number };
+  assert.equal(result.applications, 12);
+  assert.equal(result.interviews, 6);
+  assert.equal(result.pushed, 18);
+  assert.equal(result.failed, 0);
+
+  const counts = getRow<{ applications: number; interviews: number; linked: number }>(
+    `SELECT (SELECT COUNT(*) FROM applications WHERE id LIKE 'seed_app_%') AS applications,
+            (SELECT COUNT(*) FROM interviews WHERE id LIKE 'seed_itv_%') AS interviews,
+            (SELECT COUNT(*) FROM bitable_records WHERE entity_id LIKE 'seed_%' AND record_id IS NOT NULL) AS linked`,
+  );
+  assert.equal(counts?.applications, 12);
+  assert.equal(counts?.interviews, 6);
+  assert.equal(counts?.linked, 18);
+  // 演示面试要能直接看到总结与回写列，否则表格里是空壳。
+  const sample = getRow<{ headline: string; advance_recommended: string; decision: string }>(
+    `SELECT json_extract(summary_json, '$.headline') AS headline, advance_recommended, decision
+     FROM interviews WHERE id = 'seed_itv_01'`,
+  );
+  assert.match(sample?.headline ?? '', /二面/);
+  assert.equal(sample?.advance_recommended, 'yes');
+  assert.equal(sample?.decision, 'advance');
+
+  const cleared = await app.inject({ method: 'POST', url: '/api/settings/bitable/clear-demo', headers: { cookie: adminCookie } });
+  assert.equal(cleared.statusCode, 200);
+  const clearedResult = cleared.json().data as { deleted: number; remoteDeleted: number; failed: number };
+  assert.ok(clearedResult.deleted >= 19);
+  assert.equal(clearedResult.remoteDeleted, 18);
+  assert.equal(clearedResult.failed, 0);
+
+  const after = getRow<{ applications: number; interviews: number; linked: number }>(
+    `SELECT (SELECT COUNT(*) FROM applications WHERE id LIKE 'seed_app_%') AS applications,
+            (SELECT COUNT(*) FROM interviews WHERE id LIKE 'seed_itv_%') AS interviews,
+            (SELECT COUNT(*) FROM bitable_records WHERE entity_id LIKE 'seed_%') AS linked`,
+  );
+  assert.equal(after?.applications, 0);
+  assert.equal(after?.interviews, 0);
+  assert.equal(after?.linked, 0);
+  assert.ok(calls.some((call) => call.url.includes('/records/batch_delete')));
 });

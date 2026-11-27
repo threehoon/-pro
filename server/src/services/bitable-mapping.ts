@@ -246,20 +246,35 @@ function readTextList(value: unknown): string[] {
 /* ------------------------------ 入站：读飞书单元格 ------------------------------ */
 
 /** 飞书单元格可能返回字符串、数字、数组片段（富文本/多选）或对象，统一读成字符串。 */
-export function readCellText(value: unknown): string {
+/**
+ * 事件里的文本单元格是「富文本片段数组」，有时还被序列化成一段 JSON 字符串（`[{"text":"…","type":"text"}]`）。
+ * 这里统一拍平成纯文本。depth 只统计「被序列化了几层」，不是遍历深度，
+ * 上限 6 层足够覆盖真实回调，也能挡住把嵌套 JSON 当正文无限写回库里。
+ */
+export function readCellText(value: unknown, depth = 0): string {
   if (value === null || value === undefined) return '';
-  if (typeof value === 'string') return value.trim();
+  if (depth > 6) return '';
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (text.startsWith('[') || text.startsWith('{')) {
+      const parsed = jsonParse<unknown>(text, null);
+      if (parsed !== null && typeof parsed === 'object') return readCellText(parsed, depth + 1);
+    }
+    return text;
+  }
   if (typeof value === 'number') return String(value);
   if (typeof value === 'boolean') return value ? 'true' : 'false';
   if (Array.isArray(value)) {
-    return value
-      .map((item) => readCellText(item))
-      .filter(Boolean)
-      .join('，');
+    const parts = value.map((item) => readCellText(item, depth)).filter(Boolean);
+    // 富文本片段（带 type 的 {text}）是同一段话被切开的，直接拼接；其它数组（如多选）用顿号分隔。
+    const segments = value.every(
+      (item) => item !== null && typeof item === 'object' && !Array.isArray(item) && 'type' in (item as Record<string, unknown>),
+    );
+    return segments ? parts.join('') : parts.join('，');
   }
   if (typeof value === 'object') {
     const record = value as Record<string, unknown>;
-    return readCellText(record.text ?? record.name ?? record.value ?? '');
+    return readCellText(record.text ?? record.name ?? record.value ?? '', depth);
   }
   return '';
 }

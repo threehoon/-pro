@@ -1,15 +1,14 @@
 # 代码归属：PR 打开后自动指派 reviewer（配合分支保护的「Require review from Code Owners」）
 #
 # 两个负责人：
-#   @threehoon      —— 框架、数据库、权限、飞书、出站箱、样式
-#   @luy96005-prog  —— AI 提示词、模型传输、画像与总结的生成质量
+#   @threehoon      —— 框架、数据库、权限、飞书、出站箱、样式、AI 传输与缓存
+#   @luy96005-prog  —— AI 提示词、画像与总结的生成质量、引用校验
 
 # 默认：所有文件由框架负责人兜底审查
 *                                   @threehoon
 
 # ---- AI / 画像 区块：归 @luy96005-prog ----
 /server/src/services/ai/                     @luy96005-prog
-/server/src/integrations/llm.ts              @luy96005-prog
 /server/src/services/recruitment-evidence.ts @luy96005-prog
 /server/src/services/resume-parser.ts        @luy96005-prog
 /server/src/routes/recruitment-ai.ts         @luy96005-prog
@@ -19,10 +18,11 @@
 /web/src/components/workflow/JobProfilePanel.tsx @luy96005-prog
 /web/src/components/workflow/ResumeImport.tsx    @luy96005-prog
 /web/src/pages/JobWorkspacePage.tsx          @luy96005-prog
-/scripts/ai-bench.mjs                        @luy96005-prog
 
-# ---- AI 调度与状态机：队列、去重、状态机、写库，始终由框架侧审 ----
+# ---- AI 传输、调度与缓存：连接复用、DNS 校验、队列、去重、成本，由框架侧审 ----
+/server/src/integrations/llm.ts              @threehoon
 /server/src/services/recruitment-ai.ts       @threehoon
+/scripts/ai-bench.mjs                        @threehoon
 
 # ---- 框架 / 基础设施：始终由框架侧审 ----
 /server/src/db/                     @threehoon

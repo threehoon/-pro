@@ -166,8 +166,10 @@ function promptProfile(profile: Profile): string {
 }
 
 function recentRun(kind: Kind, subjectId: string): RunRecord | undefined {
+  // A served-from-cache marker is not an attempt: it must not extend the cache window or mask a real failure.
   return getRow<RunRecord>(`SELECT status, error, input_hash, created_at FROM ai_runs
-    WHERE kind = ? AND subject_id = ? AND error IS NOT 'superseded' ORDER BY created_at DESC, rowid DESC LIMIT 1`, [kind, subjectId]);
+    WHERE kind = ? AND subject_id = ? AND COALESCE(error, '') NOT IN ('superseded', 'cache_hit')
+    ORDER BY created_at DESC, rowid DESC LIMIT 1`, [kind, subjectId]);
 }
 
 const reasonMessages: Record<string, string> = {
@@ -189,6 +191,11 @@ function recordRun(kind: Kind, subjectId: string, actorId: string, inputHash: st
     if (status !== 'skipped') audit({ actorId, action: 'ai.invoke', entityType: 'ai_run', entityId: runId,
       detail: { kind, subjectId, status, error, elapsedMs, tokensIn, tokensOut } });
   });
+}
+
+/** Records a cache-served attempt so the hit rate is visible without paying for a rerun. */
+function recordCacheHit(kind: Kind, subjectId: string, actorId: string, inputHash: string): void {
+  recordRun(kind, subjectId, actorId, inputHash, null, 'skipped', 'cache_hit', 0);
 }
 
 async function generate<T>(kind: Kind, subjectId: string, actorId: string, inputHash: string, config: LlmConfig,
@@ -307,7 +314,10 @@ export function queueProfile(jobId: string, actorId: string): void {
     const inputHash = hash([PROFILE_PROMPT_VERSION, jd, modelIdentity(config)]);
     const lastRun = recentRun('profile', jobId);
     if (latest && latest.status !== 'failed' && lastRun?.input_hash === inputHash && lastRun.status !== 'failed'
-      && Date.now() - Date.parse(lastRun.created_at) < CACHE_MS) return;
+      && Date.now() - Date.parse(lastRun.created_at) < CACHE_MS) {
+      recordCacheHit('profile', jobId, actorId, inputHash);
+      return;
+    }
     let content = fallbackFor(job);
     let status: ProfileRow['status'] = 'draft';
     let generatedBy: ProfileRow['generated_by'] = 'fallback';
@@ -417,7 +427,10 @@ export function queueScreening(applicationId: string, actorId: string): void {
     const latestDetail = jsonParse<Partial<StoredDetail>>(latest?.detail_json, {});
     const canAnalyze = Boolean(config && profileRow && resume);
     if (latest && (!canAnalyze || latestDetail.resume_excerpts?.length) && latestDetail.input_hash === fingerprint && recentRun('screening', applicationId)?.status !== 'failed'
-      && Date.now() - Date.parse(latest.created_at) < CACHE_MS) return;
+      && Date.now() - Date.parse(latest.created_at) < CACHE_MS) {
+      recordCacheHit('screening', applicationId, actorId, fingerprint);
+      return;
+    }
     let detail: ScreeningDetail;
     if (config && canAnalyze) {
       const response = await generate('screening', applicationId, actorId, fingerprint, config,

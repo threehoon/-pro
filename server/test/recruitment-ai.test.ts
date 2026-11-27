@@ -13,7 +13,7 @@ delete process.env.LLM_API_KEY;
 
 const { buildApp } = await import('../src/app.ts');
 const { closeDb, getRow, run, uploadDir } = await import('../src/db/index.ts');
-const { decodeLlmResponse, isPublicAddress, llmTransport, LlmFailure, publicLlmBaseUrl, selectLlmAddress } = await import('../src/integrations/llm.ts');
+const { decodeLlmResponse, isPublicAddress, isStaleSocketFailure, llmTransport, LlmFailure, publicLlmBaseUrl, selectLlmAddress } = await import('../src/integrations/llm.ts');
 const { PROMPT_VERSIONS } = await import('../src/services/ai/prompts.ts');
 const { fallbackProfile, normalizeGeneratedProfile, normalizeProfile, scoreScreening, validateScreening } = await import('../src/services/recruitment-evidence.ts');
 const { now } = await import('../src/lib/util.ts');
@@ -112,6 +112,18 @@ test('only the official DeepSeek HTTPS endpoint accepts a reserved DNS proxy add
     assert.equal(selectLlmAddress(new URL(unrelated), [publicV4, proxyAddress]), undefined, unrelated);
   }
   assert.equal(selectLlmAddress(new URL('https://api.example.org/v1'), [publicV4]), publicV4);
+});
+
+test('a pooled connection is replayed only when it dies before the provider answered', () => {
+  for (const code of ['ECONNRESET', 'EPIPE', 'ECONNABORTED'] as const) {
+    assert.equal(isStaleSocketFailure(true, false, code), true, code);
+    // A fresh connection is a real failure, and a request that already has a response may have been billed.
+    assert.equal(isStaleSocketFailure(false, false, code), false, code);
+    assert.equal(isStaleSocketFailure(true, true, code), false, code);
+  }
+  for (const code of ['ETIMEDOUT', 'ENOTFOUND', 'ECONNREFUSED', 'ABORT_ERR', undefined]) {
+    assert.equal(isStaleSocketFailure(true, false, code), false, String(code));
+  }
 });
 
 test('DeepSeek settings use the official model ID and preserve saved keys and custom providers', async () => {
@@ -258,6 +270,19 @@ test('creating a title-only job queues an AI portrait and clearly reports a blan
       'SELECT tokens_in, tokens_out FROM ai_runs WHERE subject_id = ? AND status = ?', [id, 'ok'],
     );
     assert.deepEqual({ ...readyRun }, { tokens_in: 44, tokens_out: 2360 });
+
+    // 同一输入再次生成直接命中缓存：不调用模型、不重复计费，并留下可统计的命中记录。
+    assert.equal((await inject('POST', `${url}/generate`)).statusCode, 200);
+    await waitFor(url, 'ready');
+    assert.equal(calls, 6);
+    const hits = getRow<{ n: number; status: string }>(
+      "SELECT COUNT(*) AS n, MIN(status) AS status FROM ai_runs WHERE subject_id = ? AND error = 'cache_hit'", [id],
+    );
+    assert.deepEqual({ ...hits }, { n: 1, status: 'skipped' });
+    // 命中记录不延长缓存窗口：再点一次仍然命中，而不是重新调用模型。
+    assert.equal((await inject('POST', `${url}/generate`)).statusCode, 200);
+    await waitFor(url, 'ready');
+    assert.equal(calls, 6);
   } finally {
     llmTransport.requestJson = originalTransport;
     run("DELETE FROM integrations WHERE provider = 'llm'");

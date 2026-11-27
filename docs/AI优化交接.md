@@ -24,12 +24,13 @@ npm run dev           # API 8787 + 前端 5173
 | 文件 | 内容 |
 | --- | --- |
 | `server/src/services/ai/prompts.ts` | 提示词、统一约束、`PROMPT_VERSIONS` |
-| `server/src/integrations/llm.ts` | 传输层：DNS、TLS、超时、错误码 |
 | `server/src/services/recruitment-evidence.ts` | 输出校验与原文引用匹配 |
 | `web/src/pages/JobWorkspacePage.tsx` | 生成状态的展示 |
 | `web/src/components/workflow/*` | 画像、筛选、面试总结面板 |
 
-**不要动**：`server/src/services/recruitment-ai.ts` 的队列与状态机、`server/src/db/*` 的加列顺序、`web/src/styles/*`。需要改就提 issue 或在 PR 里说，由框架侧改。
+**不要动**：`server/src/integrations/llm.ts`（传输与速度）、`server/src/services/recruitment-ai.ts`（队列、缓存、成本）、`server/src/db/*` 的加列顺序、`web/src/styles/*`。需要改就提 issue 或在 PR 里说，由框架侧改。
+
+分工调整（2026-11-27）：连接速度与缓存由框架侧负责，你专注提示词、输出结构与生成质量。
 
 ## 4. 从哪读起
 
@@ -47,13 +48,15 @@ npm run bench -- --job <jobId>     # 跑一次完整画像生成（耗 token，�
 npm run bench -- --json            # 整段贴进 PR
 ```
 
-当前基线（deepseek-flash，3 次）：最小 786ms / p50 845ms / p95 1442ms，失败 0。
+连接复用已开启（2026-11-27）：同进程内后续请求不再重建 DNS + TCP + TLS。独立测量本机到 `api.deepseek.com` 的建连耗时从约 **110–240ms** 降到约 **82–88ms**，首个请求仍要建连。
 
-**任何优化 PR 都要贴改动前后的这两行数字。** 没有数字的「感觉快多了」不进 dev。
+端到端 ping 的耗时主要由模型这次输出了多长决定，单次 p50 波动很大（同样 5 次可能 700ms 也可能 1041ms）。所以比较时看**最小值、失败数、以及 `ai_runs` 里的 `duration_ms` 分布**，不要用一次 p50 下结论。
+
+**任何优化 PR 都要贴改动前后的数字。** 没有数字的「感觉快多了」不进 dev。
 
 ## 6. 一次只改一层
 
-- **改传输**（`llm.ts`）：keep-alive、DNS 缓存、连接复用等。只影响耗时。
+- **改传输**（`llm.ts`）：keep-alive、DNS 缓存、连接复用等。只影响耗时。**框架侧负责。**
 - **改提示词**（`prompts.ts`）：文案、结构、示例。影响质量与长度。
 - **改校验**（`recruitment-evidence.ts`）：引用匹配的松紧。影响通过率。
 
@@ -83,6 +86,34 @@ GROUP BY kind, error ORDER BY n DESC;
 3. **质量**：画像生成后**没有被人工修改**就直接通过的比例——这是唯一不需要主观打分的质量信号。
 
 改了一版提示词，就把 `PROMPT_VERSIONS` 里对应值加 1（如 `interview-summary-v2`），数据才会分到新版本上。
+
+### 成本：钱花在输出上
+
+真实库 50 次调用的实测均值（token）：
+
+| 任务 | 输入 | 输出 | 说明 |
+| --- | --- | --- | --- |
+| `composite` 复合评价 | 5521 | **7489** | 输出最大，单价也最高 |
+| `summary` 面试总结 | 4912 | **7940** | 输出最大，单价也最高 |
+| `screening` 简历筛选 | 5875 | 3359 | 单人一次；批量导入会成倍放大 |
+| `questions` 面试题 | 4052 | 2036 | 每轮面试一次 |
+| `profile` 岗位画像 | 1702 | 2670 | 每个职位版本一次 |
+
+按一个职位 + 一位候选人 + 一轮面试走完，约 **4.5 万 token**。输出占一半以上，而输出单价通常是输入的数倍——**省 token 优先省输出**，也就是少要字段、少要复述、少要枚举。
+
+另一半浪费在失败重试上：历史上有 9 次画像生成失败（`invalid_profile_structure` 5 次、`invalid_response` 3 次、`malformed_json` 1 次），白花约 2 万 token。失败一次还会自动重试一次，等于双倍。**先把通过率做上去，比压长度更省钱。**
+
+命中率怎么看（框架侧会在命中时写一条 `error='cache_hit'`、`status='skipped'` 的记录，不计费）：
+
+```sql
+SELECT kind,
+       SUM(error = 'cache_hit') hits,
+       SUM(status = 'ok') ok,
+       SUM(status = 'failed') failed
+FROM ai_runs WHERE created_at >= datetime('now','-7 day') GROUP BY kind;
+```
+
+`hits` 高说明重复点击被拦住了；`failed` 高说明提示词结构不稳。
 
 ## 8. 红线（改了就退回）
 

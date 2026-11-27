@@ -1,6 +1,6 @@
 import type { LookupAddress } from 'node:dns';
 import { lookup } from 'node:dns/promises';
-import { request } from 'node:https';
+import { Agent, request } from 'node:https';
 import { BlockList, isIP } from 'node:net';
 import { z } from 'zod';
 import { getRow, run, transaction } from '../db/index.ts';
@@ -13,6 +13,15 @@ export const DEFAULT_LLM_MODEL = 'deepseek-flash';
 const OFFICIAL_DEEPSEEK_URL = /^https:\/\/api\.deepseek\.com(?:\/v1)?\/?$/;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 export const LLM_TIMEOUT_MS = 45_000;
+/** A vetted DNS answer is reused briefly: every request still revalidates the address itself. */
+const DNS_CACHE_MS = 60_000;
+/**
+ * Keep-alive pools the TCP+TLS session, which is the whole fixed cost of a short call.
+ * The pinned lookup still runs whenever a new socket is opened.
+ */
+const keepAliveAgent = new Agent({ keepAlive: true, maxSockets: 8, keepAliveMsecs: 5_000 });
+// An idle pooled socket must never keep a one-shot process (bench, tests) alive.
+keepAliveAgent.on('free', (socket) => socket.unref());
 
 const blockedV4 = new BlockList();
 for (const [address, prefix] of [
@@ -169,6 +178,68 @@ function waitForDns(hostname: string, signal: AbortSignal) {
   });
 }
 
+const dnsCache = new Map<string, { addresses: LookupAddress[]; at: number }>();
+
+async function selectVettedAddress(target: URL, signal: AbortSignal): Promise<LookupAddress> {
+  const cached = dnsCache.get(target.hostname);
+  const fresh = cached && Date.now() - cached.at < DNS_CACHE_MS ? cached.addresses : undefined;
+  const addresses = fresh ?? await waitForDns(target.hostname, signal).catch(() => {
+    throw new LlmFailure(signal.aborted ? 'timeout' : 'unsafe_endpoint');
+  });
+  // The cached answer is revalidated, so a poisoned or stale entry still fails closed.
+  const selected = selectLlmAddress(target, addresses);
+  if (!selected) {
+    dnsCache.delete(target.hostname);
+    throw new LlmFailure('unsafe_endpoint');
+  }
+  if (!fresh) dnsCache.set(target.hostname, { addresses, at: Date.now() });
+  return selected;
+}
+
+type Attempt = { kind: 'text'; text: string } | { kind: 'failure'; code: LlmFailureCode } | { kind: 'stale' };
+
+/** A pooled socket can be closed by the peer while it idles. Only that case is safe to replay. */
+export function isStaleSocketFailure(reusedSocket: boolean, responded: boolean, code: string | undefined): boolean {
+  return reusedSocket && !responded && (code === 'ECONNRESET' || code === 'EPIPE' || code === 'ECONNABORTED');
+}
+
+function postCompletion(target: URL, selected: LookupAddress, config: LlmConfig, body: string, signal: AbortSignal): Promise<Attempt> {
+  return new Promise<Attempt>((resolve) => {
+    let responded = false;
+    const req = request(target, {
+      method: 'POST', signal, agent: keepAliveAgent, family: selected.family, rejectUnauthorized: true,
+      // Pin the vetted DNS result for the actual connection. URL hostname remains the TLS identity.
+      lookup: (_hostname, _options, callback) => callback(null, selected.address, selected.family),
+      headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+    }, (res) => {
+      responded = true;
+      if (res.statusCode !== 200) {
+        res.destroy();
+        resolve({ kind: 'failure', code: 'provider_error' });
+        return;
+      }
+      const chunks: Buffer[] = [];
+      let size = 0;
+      res.on('data', (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > MAX_RESPONSE_BYTES) {
+          resolve({ kind: 'failure', code: 'invalid_response' });
+          res.destroy();
+        } else {
+          chunks.push(chunk);
+        }
+      });
+      res.on('error', () => resolve({ kind: 'failure', code: signal.aborted ? 'timeout' : 'provider_error' }));
+      res.on('end', () => resolve({ kind: 'text', text: Buffer.concat(chunks).toString('utf8') }));
+    });
+    req.on('error', (error: NodeJS.ErrnoException) => {
+      if (isStaleSocketFailure(req.reusedSocket === true, responded, error.code)) resolve({ kind: 'stale' });
+      else resolve({ kind: 'failure', code: signal.aborted ? 'timeout' : 'provider_error' });
+    });
+    req.end(body);
+  });
+}
+
 async function requestJson(config: LlmConfig, instruction: string, input: string, options?: RequestOptions): Promise<LlmResult> {
   let target: URL;
   try {
@@ -177,11 +248,7 @@ async function requestJson(config: LlmConfig, instruction: string, input: string
     throw new LlmFailure('unsafe_endpoint');
   }
   const signal = AbortSignal.timeout(options?.timeoutMs ?? LLM_TIMEOUT_MS);
-  const addresses = await waitForDns(target.hostname, signal).catch(() => {
-    throw new LlmFailure(signal.aborted ? 'timeout' : 'unsafe_endpoint');
-  });
-  const selected = selectLlmAddress(target, addresses);
-  if (!selected) throw new LlmFailure('unsafe_endpoint');
+  const selected = await selectVettedAddress(target, signal);
   const useDeepSeekThinking = OFFICIAL_DEEPSEEK_URL.test(target.href) && options?.deepSeekThinking;
   target.pathname = `${target.pathname.replace(/\/+$/, '')}/chat/completions`;
   const body = JSON.stringify({
@@ -191,36 +258,12 @@ async function requestJson(config: LlmConfig, instruction: string, input: string
     ...(options ? { max_tokens: options.maxTokens } : {}),
     ...(useDeepSeekThinking ? { thinking: { type: useDeepSeekThinking } } : {}),
   });
-  const response = await new Promise<string>((resolve, reject) => {
-    const req = request(target, {
-      method: 'POST', signal, agent: false, family: selected.family, rejectUnauthorized: true,
-      // Pin the vetted DNS result for the actual connection. URL hostname remains the TLS identity.
-      lookup: (_hostname, _options, callback) => callback(null, selected.address, selected.family),
-      headers: { authorization: `Bearer ${config.apiKey}`, 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
-    }, (res) => {
-      if (res.statusCode !== 200) {
-        res.destroy();
-        reject(new LlmFailure('provider_error'));
-        return;
-      }
-      const chunks: Buffer[] = [];
-      let size = 0;
-      res.on('data', (chunk: Buffer) => {
-        size += chunk.length;
-        if (size > MAX_RESPONSE_BYTES) {
-          reject(new LlmFailure('invalid_response'));
-          res.destroy();
-        } else {
-          chunks.push(chunk);
-        }
-      });
-      res.on('error', () => reject(new LlmFailure(signal.aborted ? 'timeout' : 'provider_error')));
-      res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-    });
-    req.on('error', () => reject(new LlmFailure(signal.aborted ? 'timeout' : 'provider_error')));
-    req.end(body);
-  });
-  return decodeLlmResponse(response, config.apiKey);
+  let attempt = await postCompletion(target, selected, config, body, signal);
+  if (attempt.kind === 'stale') {
+    attempt = signal.aborted ? { kind: 'failure', code: 'timeout' } : await postCompletion(target, selected, config, body, signal);
+  }
+  if (attempt.kind !== 'text') throw new LlmFailure(attempt.kind === 'stale' ? 'provider_error' : attempt.code);
+  return decodeLlmResponse(attempt.text, config.apiKey);
 }
 
 const usageValue = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).nullish().catch(null);

@@ -14,6 +14,7 @@ delete process.env.LLM_API_KEY;
 const { buildApp } = await import('../src/app.ts');
 const { closeDb, getRow, run, uploadDir } = await import('../src/db/index.ts');
 const { decodeLlmResponse, isPublicAddress, llmTransport, LlmFailure, publicLlmBaseUrl, selectLlmAddress } = await import('../src/integrations/llm.ts');
+const { PROMPT_VERSIONS } = await import('../src/services/ai/prompts.ts');
 const { fallbackProfile, normalizeGeneratedProfile, normalizeProfile, scoreScreening, validateScreening } = await import('../src/services/recruitment-evidence.ts');
 const { now } = await import('../src/lib/util.ts');
 
@@ -230,10 +231,15 @@ test('creating a title-only job queues an AI portrait and clearly reports a blan
     const failed = await waitFor(url, 'failed');
     assert.match(failed.reason, /返回了空内容/);
     assert.equal(failed.data.profile.status, 'failed');
-    const failedRun = getRow<{ error: string; tokens_in: number; tokens_out: number }>(
-      'SELECT error, tokens_in, tokens_out FROM ai_runs WHERE subject_id = ?', [id],
+    const failedRun = getRow<{ error: string; tokens_in: number; tokens_out: number; prompt_version: string }>(
+      'SELECT error, tokens_in, tokens_out, prompt_version FROM ai_runs WHERE subject_id = ?', [id],
     );
-    assert.deepEqual({ ...failedRun }, { error: 'empty_response', tokens_in: 44, tokens_out: 10 });
+    assert.deepEqual(
+      { error: failedRun?.error, tokens_in: failedRun?.tokens_in, tokens_out: failedRun?.tokens_out },
+      { error: 'empty_response', tokens_in: 44, tokens_out: 10 },
+    );
+    // 每次调用都写下提示词版本，才能按版本对比耗时与质量。
+    assert.equal(failedRun?.prompt_version, PROMPT_VERSIONS.profile);
     assert.equal((await inject('POST', `${url}/generate`)).statusCode, 200);
     const invalid = await waitFor(url, 'failed');
     assert.equal(invalid.data.profile.version, 2);

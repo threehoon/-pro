@@ -26,12 +26,14 @@ function ConfigForm({ config, onSave }: { config: LlmConfig; onSave: () => void 
   const [baseUrl, setBaseUrl] = useState<string | null>(null);
   const [model, setModel] = useState<string | null>(null);
   const [apiKey, setApiKey] = useState("");
+  const [thinking, setThinking] = useState<"off" | "on" | null>(null);
   const [busy, setBusy] = useState<"save" | "test" | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const endpoint = baseUrl ?? config.baseUrl;
   const modelName = model ?? config.model;
-  const dirty = endpoint !== config.baseUrl || modelName !== config.model || Boolean(apiKey.trim());
+  const deepThinking = thinking ?? config.thinking;
+  const dirty = endpoint !== config.baseUrl || modelName !== config.model || deepThinking !== config.thinking || Boolean(apiKey.trim());
 
   async function run(action: "save" | "test") {
     setBusy(action);
@@ -39,7 +41,8 @@ function ConfigForm({ config, onSave }: { config: LlmConfig; onSave: () => void 
     setNotice("");
     try {
       if (action === "save") {
-        requireAiResult(await api.saveLlmConfig({ baseUrl: endpoint.trim(), model: modelName.trim(), apiKey: apiKey.trim() || undefined }), "AI 配置保存失败");
+        requireAiResult(await api.saveLlmConfig({ baseUrl: endpoint.trim(), model: modelName.trim(),
+          apiKey: apiKey.trim() || undefined, thinking: deepThinking }), "AI 配置保存失败");
         setApiKey("");
         onSave();
         setNotice("AI 配置已保存。");
@@ -65,7 +68,18 @@ function ConfigForm({ config, onSave }: { config: LlmConfig; onSave: () => void 
         {(id) => <Input id={id} type="password" autoComplete="new-password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} />}
       </Field>
     </div>
-    <dl className="workflow-metrics"><div><dt>累计输入 Token</dt><dd>{config.tokensIn.toLocaleString("zh-CN")}</dd></div><div><dt>累计输出 Token</dt><dd>{config.tokensOut.toLocaleString("zh-CN")}</dd></div></dl>
+    <label className="queue-check">
+      <input type="checkbox" checked={deepThinking === "on"} disabled={!!busy}
+        onChange={(event) => setThinking(event.target.checked ? "on" : "off")} />
+      允许模型深入思考
+    </label>
+    <p className="muted">默认关闭。开启后回答更细，但同期生成的耗时与费用约为关闭时的 4–8 倍，只在需要极高细节时打开。</p>
+    <dl className="workflow-metrics">
+      <div><dt>本月输入 Token</dt><dd>{config.tokensIn.toLocaleString("zh-CN")}</dd></div>
+      <div><dt>本月输出 Token</dt><dd>{config.tokensOut.toLocaleString("zh-CN")}</dd></div>
+      <div><dt>其中思考 Token</dt><dd>{config.reasoningTokens.toLocaleString("zh-CN")}</dd></div>
+      <div><dt>其中缓存命中</dt><dd>{config.cachedTokens.toLocaleString("zh-CN")}</dd></div>
+    </dl>
     {error && <p role="alert" className="form-error">{error}</p>}
     {notice && <p role="status">{notice}</p>}
     <div className="workflow-actions">

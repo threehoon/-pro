@@ -254,6 +254,8 @@ CREATE TABLE IF NOT EXISTS ai_runs (
   error TEXT,
   tokens_in INTEGER,
   tokens_out INTEGER,
+  reasoning_tokens INTEGER,
+  cached_tokens INTEGER,
   duration_ms INTEGER,
   actor_id TEXT REFERENCES users(id),
   created_at TEXT NOT NULL

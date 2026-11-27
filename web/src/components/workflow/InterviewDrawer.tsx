@@ -12,6 +12,20 @@ const summaryLabels: Record<AiStatus, string> = { none: "待总结", generating:
 const decisions = { advance: "进入复试", negotiate: "进入谈薪", reject: "归档投递" } as const;
 const finished = (status: AiStatus | undefined) => status === "ready" || status === "manual";
 
+/** 生成期间显示已等待时长：一句不动的文案会让人以为卡死。 */
+function ProgressStatus({ label, estimate }: { label: string; estimate: string }) {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => setSeconds((value) => value + 1), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  return (
+    <p className="muted" role="status">
+      {label} · 已等待 {seconds} 秒（{estimate}）
+    </p>
+  );
+}
+
 export function InterviewDrawer({ interview, canWrite, rejectionReasons, onClose, onChange }: { interview: Interview; canWrite: boolean; rejectionReasons: string[]; onClose: () => void; onChange: () => void }) {
   const [poll, setPoll] = useState(false);
   const [pollPlan, setPollPlan] = useState(false);
@@ -140,13 +154,13 @@ export function InterviewDrawer({ interview, canWrite, rejectionReasons, onClose
       )}
       {!resource.data && !resource.error && <ListSkeleton rows={2} />}
       {resource.error && <ErrorState message={resource.error} onRetry={resource.reload} />}
-      {pollPlan && <p className="muted" role="status">正在准备本轮提问提纲…</p>}
+      {pollPlan && <ProgressStatus label="正在准备本轮提问提纲" estimate="通常 3–10 秒" />}
       {data?.plan?.questions?.length ? <details className="workflow-disclosure"><summary>本轮提问提纲</summary><ol className="workflow-evidence">
         {data.plan.questions.map((item, i) => <li key={i}><strong>{item.question}</strong><p className="muted">关注：{item.listen_for}</p><p>追问：{item.follow_up}</p></li>)}
       </ol></details> : null}
       {!interview.is_draft && <section className="workflow-stack">
         <div className="workflow-section-head"><h3>本轮总结</h3><Badge tone={status === "failed" ? "danger" : finished(status) ? "brand" : "neutral"}>{summaryLabels[status]}</Badge></div>
-        {status === "generating" && <p className="muted" role="status">正在从逐字稿提取证据…</p>}
+        {status === "generating" && <ProgressStatus label="正在从逐字稿提取证据" estimate="通常 5–15 秒" />}
         {status === "failed" && <p className="form-error" role="alert">{resource.data?.reason || "总结生成失败，可以重试或写一句结论。"}</p>}
         {summary && <div className="workflow-stack">
           {(summary.headline || summary.conclusion) && <p className="workflow-lead">{summary.headline || summary.conclusion}</p>}
@@ -186,7 +200,7 @@ export function InterviewDrawer({ interview, canWrite, rejectionReasons, onClose
         {!compositeResource.data && !compositeResource.error && <ListSkeleton rows={1} />}
         {compositeResource.error && <ErrorState message={compositeResource.error} onRetry={compositeResource.reload} />}
         {compositeData?.status === "none" && <p className="muted">本轮总结就绪后自动生成综合评估。</p>}
-        {pollComposite && <p className="muted" role="status">正在综合两轮面试记录…</p>}
+        {pollComposite && <ProgressStatus label="正在综合两轮面试记录" estimate="通常 5–15 秒" />}
         {compositeData?.status === "failed" && <p className="form-error" role="alert">{compositeResource.data?.reason || "综合评估生成失败。"}</p>}
         {composite?.headline && <p className="workflow-lead">{composite.headline}</p>}
         {composite?.rounds?.map((round) => <p key={round.round}>第 {round.round} 轮 · {round.headline}</p>)}

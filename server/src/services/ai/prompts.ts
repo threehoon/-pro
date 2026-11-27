@@ -32,7 +32,7 @@ export const testInstruction = '返回 JSON {"ok":true}。';
 export const PROMPT_VERSIONS = {
   profile: 'portrait-standard-v2',
   screening: 'resume-summary-v2',
-  summary: 'interview-summary-v1',
+  summary: 'interview-summary-v2',
   questions: 'interview-questions-v1',
   composite: 'composite-v1',
   test: 'ping-v1',

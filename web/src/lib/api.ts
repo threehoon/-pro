@@ -255,7 +255,7 @@ export const api = {
     signal?: AbortSignal,
   ) => request<FeishuOutboxPage>("GET", `/notifications${qs({ channel: "feishu", ...filters })}`, undefined, { signal }),
   llmConfig: () => request<AiResult<LlmConfig>>("GET", "/settings/llm"),
-  saveLlmConfig: (input: { baseUrl: string; model: string; apiKey?: string }) =>
+  saveLlmConfig: (input: { baseUrl: string; model: string; apiKey?: string; thinking?: "off" | "on" }) =>
     request<AiResult<LlmConfig>>("POST", "/settings/llm", input),
   testLlm: () => request<AiResult<{ latencyMs: number; model: string }>>("POST", "/settings/llm/test"),
   feishu: () => request<FeishuStatus>("GET", "/settings/feishu"),

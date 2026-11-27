@@ -4,6 +4,7 @@ import { badRequest, notFound } from '../lib/errors.ts';
 import { INTERVIEW_MODE_LABELS, type InterviewMode } from '../constants.ts';
 import { isFeishuCalendarConfigured, syncFeishuCalendarEvent } from '../integrations/feishu.ts';
 import { audit } from './audit.ts';
+import { hookBitableSync } from './bitable-sync.ts';
 import {
   notifyInterviewCancelled,
   notifyInterviewScheduled,
@@ -29,6 +30,12 @@ export interface InterviewRow {
   summary_status: string;
   is_draft: number;
   decision: string | null;
+  /** 老版本的 1–5 星评分与文字反馈：接口不再对外，只在多维表格同步里读写。 */
+  score: number | null;
+  feedback: string | null;
+  recommendation: string | null;
+  /** 是否推荐进复试：yes / hold / no，可在飞书多维表格里改，改动会回写到这里 */
+  advance_recommended: string | null;
   external_calendar_event_id: string | null;
   calendar_sync_status: CalendarSyncStatus;
   calendar_sync_error: string | null;
@@ -45,7 +52,8 @@ export interface InterviewRow {
 
 export const INTERVIEW_FIELDS = `i.id, i.application_id, i.round, i.title, i.mode, i.scheduled_at,
   i.duration_minutes, i.location, i.meeting_url, i.interviewer_id, i.status, i.summary_status,
-  i.is_draft, i.decision, i.external_calendar_event_id, i.calendar_sync_status, i.calendar_sync_error,
+  i.is_draft, i.decision, i.recommendation, i.advance_recommended,
+  i.external_calendar_event_id, i.calendar_sync_status, i.calendar_sync_error,
   i.calendar_synced_at, i.calendar_attendees_json, i.calendar_recreate_required, i.created_by,
   i.created_at, i.updated_at, i.completed_at`;
 
@@ -358,6 +366,7 @@ export function listInterviews(options: {
   return all<InterviewListItem>(
     `SELECT i.id, i.application_id, i.round, i.title, i.mode, i.scheduled_at, i.duration_minutes,
             i.status, i.summary_status, i.location, i.meeting_url, i.interviewer_id, u.name AS interviewer_name,
+            i.recommendation, i.advance_recommended,
             i.external_calendar_event_id, i.calendar_sync_status, i.calendar_sync_error, i.calendar_synced_at,
             c.id AS candidate_id, c.name AS candidate_name,
             j.id AS job_id, j.title AS job_title
@@ -462,6 +471,7 @@ export function createInterview(input: {
       );
     }
   });
+  hookBitableSync('interview', interviewId);
   return getRow<InterviewRow>(`SELECT ${INTERVIEW_FIELDS} FROM interviews i WHERE i.id = ?`, [interviewId])!;
 }
 
@@ -597,6 +607,7 @@ export function updateInterview(input: {
     }
   });
 
+  hookBitableSync('interview', input.interviewId);
   return getRow<InterviewRow>(`SELECT ${INTERVIEW_FIELDS} FROM interviews i WHERE i.id = ?`, [input.interviewId])!;
 }
 
@@ -644,6 +655,7 @@ export function decideInterview(input: {
     audit({ actorId: input.actorId, action: 'interview.decide', entityType: 'interview', entityId: interview.id,
       detail: { decision: input.decision, round: interview.round, allowWithoutSummary: input.allowWithoutSummary === true } });
   });
+  hookBitableSync('interview', interview.id);
   return { interview: getRow<InterviewRow>(`SELECT ${INTERVIEW_FIELDS} FROM interviews i WHERE i.id = ?`, [interview.id]),
     application: getApplication(application.id), offer: input.decision === 'negotiate' ? offerDetail(application.id).offer : null };
 }
@@ -701,6 +713,7 @@ export function cancelInterview(input: {
       afterCommit(() => scheduleInterviewCalendarSync(input.interviewId));
     }
   });
+  hookBitableSync('interview', input.interviewId);
   return getRow<InterviewRow>(`SELECT ${INTERVIEW_FIELDS} FROM interviews i WHERE i.id = ?`, [input.interviewId])!;
 }
 
@@ -791,6 +804,7 @@ export function markNoShow(interviewId: string, actorId: string): InterviewRow {
   if (interview.status !== 'scheduled' || interview.is_draft) throw badRequest('只有已安排的面试可以标记爽约');
   run(`UPDATE interviews SET status = 'no_show', updated_at = ? WHERE id = ?`, [now(), interviewId]);
   audit({ actorId, action: 'interview.no_show', entityType: 'interview', entityId: interviewId });
+  hookBitableSync('interview', interviewId);
   return getRow<InterviewRow>(`SELECT ${INTERVIEW_FIELDS} FROM interviews i WHERE i.id = ?`, [interviewId])!;
 }
 

@@ -261,6 +261,20 @@ export const api = {
   saveLlmConfig: (input: { baseUrl: string; model: string; apiKey?: string; thinking?: "off" | "on" }) =>
     request<AiResult<LlmConfig>>("POST", "/settings/llm", input),
   testLlm: () => request<AiResult<{ latencyMs: number; model: string }>>("POST", "/settings/llm/test"),
+  bitableConfig: () => request<AiResult<import("../workflowTypes").BitableConfig>>("GET", "/settings/bitable"),
+  saveBitableConfig: (input: {
+    appToken?: string | null;
+    interviewsTableId?: string | null;
+    applicationsTableId?: string | null;
+    enabled?: boolean;
+    fallbackMinutes?: number;
+  }) => request<AiResult<import("../workflowTypes").BitableConfig>>("POST", "/settings/bitable", input),
+  testBitable: () =>
+    request<AiResult<import("../workflowTypes").BitableTestResult>>("POST", "/settings/bitable/test", {}),
+  reconcileBitable: () =>
+    request<AiResult<import("../workflowTypes").BitableReconcileResult>>("POST", "/settings/bitable/reconcile", {}),
+  backfillBitable: () =>
+    request<AiResult<import("../workflowTypes").BitableBackfillResult>>("POST", "/settings/bitable/backfill", {}),
   asrConfig: () => request<AiResult<AsrConfig>>("GET", "/settings/asr"),
   saveAsrConfig: (input: { baseUrl: string; model: string; apiKey?: string; language?: string }) =>
     request<AiResult<AsrConfig>>("POST", "/settings/asr", input),

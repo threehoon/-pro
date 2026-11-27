@@ -3,6 +3,7 @@ import { activeLlmConfig, cleanupAiRuns, llmTransport, LlmFailure, LLM_TIMEOUT_M
 import { badRequest, conflict, notFound } from '../lib/errors.ts';
 import { id, jsonParse, now, sha256, toJson } from '../lib/util.ts';
 import { audit } from './audit.ts';
+import { hookBitableSync } from './bitable-sync.ts';
 import {
   compositeInstruction, POLICY, profileInstruction, PROMPT_VERSIONS, questionsInstruction,
   screeningInstruction, summaryInstruction, testInstruction,
@@ -588,6 +589,8 @@ function readyCompositeReset(applicationId: string): void {
 function saveSummary(row: InterviewRow, status: Status, summary?: SummaryData, model?: string): void {
   run('UPDATE interviews SET summary_status = ?, summary_json = ?, summary_model = ?, summarized_at = ? WHERE id = ?',
     [status, toJson(summary ?? {}), model ?? null, summary ? now() : null, row.id]);
+  // 总结一落地就把这一行推给多维表格：面试表里看到的是「本轮总结」而不是空列。
+  if (status === 'ready' || status === 'manual') hookBitableSync('interview', row.id);
 }
 
 /**
@@ -775,6 +778,7 @@ export function queueComposite(applicationId: string, actorId: string): void {
     const result = inputHash === currentHash ? response.value : undefined;
     run('UPDATE applications SET composite_status = ?, composite_json = ? WHERE id = ?',
       [result ? 'ready' : 'failed', toJson(result ?? {}), applicationId]);
+    if (result) hookBitableSync('application', applicationId);
   });
 }
 

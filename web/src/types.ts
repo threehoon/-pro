@@ -235,6 +235,8 @@ export interface Interview {
   score: number | null;
   feedback: string | null;
   recommendation: string | null;
+  /** 是否推荐进复试，飞书多维表格里可改并回写 */
+  advance_recommended?: string | null;
   created_at: string;
   updated_at: string;
   candidate_id?: string;

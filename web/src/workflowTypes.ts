@@ -221,3 +221,76 @@ export interface LlmConfig {
   /** 本月命中服务商前缀缓存的输入 token。 */
   cachedTokens: number;
 }
+
+export interface BitableStats {
+  queue: { pending: number; failed: number; done: number };
+  records: { linked: number; errors: number };
+  events: { pending: number; applied: number; ignored: number };
+  reminders: { deleted: number };
+}
+
+export interface BitableConnection {
+  running: boolean;
+  startedAt: string | null;
+  lastError: string | null;
+  lastEventAt: string | null;
+  connection: "idle" | "connecting" | "connected" | "reconnecting" | "failed";
+}
+
+export interface BitableEventRow {
+  event_id: string;
+  table_id: string | null;
+  record_id: string | null;
+  action: string | null;
+  state: string;
+  note: string | null;
+  operator_open_id: string | null;
+  received_at: string;
+  applied_at: string | null;
+}
+
+export interface BitableColumns {
+  interview: string[];
+  application: string[];
+  interviewWritable: string[];
+  applicationWritable: string[];
+}
+
+/** 双向同步的状态快照：配置 + 长连接 + 队列 + 最近事件 + 需要的列。 */
+export interface BitableConfig {
+  appToken: string | null;
+  interviewsTableId: string | null;
+  applicationsTableId: string | null;
+  fields: Record<string, string>;
+  enabled: boolean;
+  fallbackMinutes: number;
+  configured: boolean;
+  subscribedAt: string | null;
+  lastEventAt: string | null;
+  lastReconcileAt: string | null;
+  updatedAt: string | null;
+  stats: BitableStats;
+  events: BitableEventRow[];
+  connection: BitableConnection;
+  feishuApp: boolean;
+  columns: BitableColumns;
+}
+
+export interface BitableTestResult {
+  ok: boolean;
+  checks: { name: string; ok: boolean; message: string }[];
+}
+
+export interface BitableReconcileResult {
+  checked: number;
+  applied: number;
+  conflicts: number;
+  pushed: number;
+  errors: string[];
+}
+
+export interface BitableBackfillResult {
+  queued: number;
+  pushed: number;
+  failed: number;
+}

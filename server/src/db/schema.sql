@@ -249,6 +249,7 @@ CREATE TABLE IF NOT EXISTS ai_runs (
   subject_id TEXT,
   input_hash TEXT,
   model TEXT,
+  prompt_version TEXT,
   status TEXT NOT NULL CHECK (status IN ('ok','failed','skipped')),
   error TEXT,
   tokens_in INTEGER,

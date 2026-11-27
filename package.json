@@ -18,6 +18,7 @@
     "seed": "node server/src/db/seed.ts",
     "db:reset": "node server/src/db/reset.ts",
     "flow": "node scripts/flow.mjs",
+    "bench": "node scripts/ai-bench.mjs",
     "smoke": "node scripts/ui-smoke.mjs",
     "smoke:permissions": "node scripts/permissions.mjs",
     "smoke:heading": "node scripts/heading-state.mjs"

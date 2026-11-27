@@ -6,6 +6,7 @@ import {
   cancelInterview,
   decideInterview,
   createInterview,
+  ensureInterviewCalendarSync,
   interviewWithContext,
   listInterviews,
   markNoShow,
@@ -111,5 +112,12 @@ export async function interviewRoutes(app: FastifyInstance) {
     const user = requireRecruiter(request);
     const { interviewId } = request.params as { interviewId: string };
     return syncInterviewCalendarNow(interviewId, user.id);
+  });
+
+  // 打开面试详情时自动补同步：幂等，未配置/草稿/已结束都只回原因，不报错
+  app.post('/api/interviews/:interviewId/ensure-calendar', async (request) => {
+    const user = requireRecruiter(request);
+    const { interviewId } = request.params as { interviewId: string };
+    return ensureInterviewCalendarSync(interviewId, user.id);
   });
 }

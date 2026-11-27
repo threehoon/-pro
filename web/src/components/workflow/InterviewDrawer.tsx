@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Badge, Button, ErrorState, Field, Input, ListSkeleton, Modal, Select, Textarea, useConfirm } from "../ui";
 import { api } from "../../lib/api";
 import { fmtDateTime, interviewTitle } from "../../lib/format";
@@ -39,6 +39,11 @@ export function InterviewDrawer({ interview, canWrite, rejectionReasons, onClose
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [liveInterview, setLiveInterview] = useState<Interview>(interview);
+  const [autoSyncing, setAutoSyncing] = useState(false);
+  // 服务端说还没配置共享日历时就不再显示「未同步」和同步按钮，免得每次点都报错
+  const [calendarOff, setCalendarOff] = useState(false);
+  // 每次打开详情最多自动补同步一次，失败后交给手动按钮，避免反复调用飞书
+  const autoSynced = useRef<string | null>(null);
   // 父级刷新后传入新行时同步本地快照，避免日历徽标与会议链接停留在旧状态
   useEffect(() => {
     setLiveInterview(interview);
@@ -97,7 +102,41 @@ export function InterviewDrawer({ interview, canWrite, rejectionReasons, onClose
     });
   }
 
-  const calBadge = calendarSyncBadge(liveInterview.calendar_sync_status);
+  // 打开详情时自动补同步：飞书日历配好之前创建的面试会一直停在 none，以前每次都还要手点一次
+  useEffect(() => {
+    if (!canWrite) return;
+    const target = liveInterview;
+    if (target.is_draft || target.status !== "scheduled") return;
+    if (target.calendar_sync_status !== "none" && target.calendar_sync_status !== "failed") return;
+    if (autoSynced.current === target.id) return;
+    autoSynced.current = target.id;
+    setAutoSyncing(true);
+    void (async () => {
+      try {
+        const res = await api.ensureInterviewCalendar(target.id);
+        setLiveInterview(res.interview);
+        if (res.sync.ok && !res.sync.skipped) {
+          setNotice("已自动同步飞书日历。");
+          onChange();
+        } else if (res.sync.reason === "not_configured") {
+          setCalendarOff(true);
+        } else if (res.sync.error) {
+          setError(`日历自动同步失败：${res.sync.error}`);
+        }
+      } catch (err) {
+        setError(apiMessage(err, "日历自动同步失败"));
+      } finally {
+        setAutoSyncing(false);
+      }
+    })();
+  }, [canWrite, liveInterview, onChange]);
+
+  const calBadge = autoSyncing
+    ? calendarSyncBadge("pending")
+    : calendarSyncBadge(liveInterview.calendar_sync_status) ??
+      (!calendarOff && liveInterview.status === "scheduled" && !liveInterview.is_draft
+        ? { label: "未同步飞书日历", tone: "neutral" as const }
+        : null);
   const meetingUrl = liveInterview.status === "cancelled" ? null : safeMeetingUrl(liveInterview.meeting_url);
 
   async function syncCalendar() {
@@ -141,8 +180,10 @@ export function InterviewDrawer({ interview, canWrite, rejectionReasons, onClose
             )}
           </div>
           {canWrite && calBadge && (
-            <Button size="sm" loading={busy === "calendar"} disabled={!!busy} onClick={() => void syncCalendar()}>
-              {liveInterview.calendar_sync_status === "failed" ? "重试同步日历" : "重新同步日历"}
+            <Button size="sm" loading={busy === "calendar" || autoSyncing} disabled={!!busy || autoSyncing}
+              onClick={() => void syncCalendar()}>
+              {liveInterview.calendar_sync_status === "failed" ? "重试同步日历"
+                : liveInterview.calendar_sync_status === "none" ? "同步日历" : "重新同步日历"}
             </Button>
           )}
           {liveInterview.calendar_sync_status === "failed" && liveInterview.calendar_sync_error && (

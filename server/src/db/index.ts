@@ -105,6 +105,9 @@ function applySchema(conn: DatabaseSync): void {
   ensureColumn(conn, 'applications', 'composite_json', "TEXT NOT NULL DEFAULT '{}'");
   ensureColumn(conn, 'applications', 'composite_status', "TEXT NOT NULL DEFAULT 'none'");
   ensureColumn(conn, 'applications', 'hired_at', 'TEXT');
+  ensureColumn(conn, 'ai_runs', 'prompt_version', 'TEXT');
+  ensureColumn(conn, 'ai_runs', 'reasoning_tokens', 'INTEGER');
+  ensureColumn(conn, 'ai_runs', 'cached_tokens', 'INTEGER');
   conn.exec(`
     BEGIN IMMEDIATE;
     INSERT INTO application_events (id, application_id, from_stage, to_stage, type, note, created_at)

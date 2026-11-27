@@ -194,6 +194,12 @@ export interface LlmConfig {
   model: string;
   keyTail: string | null;
   configured: boolean;
+  /** 是否允许模型深入思考：更慢更贵，默认关闭。 */
+  thinking: "off" | "on";
   tokensIn: number;
   tokensOut: number;
+  /** 本月花在隐藏推理上的输出 token，与正文分开记账。 */
+  reasoningTokens: number;
+  /** 本月命中服务商前缀缓存的输入 token。 */
+  cachedTokens: number;
 }

@@ -732,6 +732,57 @@ export async function syncInterviewCalendarNow(interviewId: string, actorId: str
   };
 }
 
+/** 自动补同步的跳过原因：客户端据此决定是否提示，不必用错误横幅打扰。 */
+export type CalendarEnsureReason = 'not_configured' | 'draft' | 'not_scheduled' | 'in_flight' | 'already_synced';
+
+function calendarIsCurrent(interview: InterviewRow): boolean {
+  return (
+    interview.calendar_sync_status === 'synced' &&
+    Boolean(interview.external_calendar_event_id) &&
+    interview.calendar_recreate_required !== 1
+  );
+}
+
+/**
+ * 打开面试详情时的幂等补同步。
+ * 飞书日历配置好之前创建的面试会一直停在 `none`，每次都要手动点一次「同步日历」；
+ * 这里把「该同步且还没同步」的判定放到服务端，客户端打开抽屉即调用，重复调用不会重复创建日程。
+ * 与手动同步的区别：未配置、草稿、已结束、正在同步时静默返回原因，不抛错。
+ */
+export async function ensureInterviewCalendarSync(interviewId: string, actorId: string) {
+  const interview = getRow<InterviewRow>(`SELECT ${INTERVIEW_FIELDS} FROM interviews i WHERE i.id = ?`, [interviewId]);
+  if (!interview) throw notFound('面试不存在');
+
+  const skip = (reason: CalendarEnsureReason) => ({
+    interview: interviewWithContext(interviewId),
+    sync: { ok: false, skipped: true, error: null, reason },
+  });
+  if (!isFeishuCalendarConfigured()) return skip('not_configured');
+  if (interview.is_draft) return skip('draft');
+  if (interview.status !== 'scheduled') return skip('not_scheduled');
+  if (interview.calendar_sync_status === 'pending') return skip('in_flight');
+  if (calendarIsCurrent(interview)) return skip('already_synced');
+
+  const outcome = await enqueueInterviewSyncChain(interviewId, () => runInterviewSyncWithCompensation(interviewId));
+  audit({
+    actorId,
+    action: 'interview.calendar_sync_auto',
+    entityType: 'interview',
+    entityId: interviewId,
+    detail: { ok: outcome.ok, skipped: Boolean(outcome.skipped), error: outcome.error ?? null },
+  });
+  return {
+    interview: interviewWithContext(interviewId),
+    sync: {
+      ok: outcome.ok,
+      skipped: Boolean(outcome.skipped),
+      error: outcome.error ?? null,
+      reason: null,
+      meetingUrl: outcome.meetingUrl ?? null,
+    },
+  };
+}
+
 export function markNoShow(interviewId: string, actorId: string): InterviewRow {
   const interview = getRow<InterviewRow>(`SELECT ${INTERVIEW_FIELDS} FROM interviews i WHERE i.id = ?`, [interviewId]);
   if (!interview) throw notFound('面试不存在');

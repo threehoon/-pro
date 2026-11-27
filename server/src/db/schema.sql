@@ -249,10 +249,13 @@ CREATE TABLE IF NOT EXISTS ai_runs (
   subject_id TEXT,
   input_hash TEXT,
   model TEXT,
+  prompt_version TEXT,
   status TEXT NOT NULL CHECK (status IN ('ok','failed','skipped')),
   error TEXT,
   tokens_in INTEGER,
   tokens_out INTEGER,
+  reasoning_tokens INTEGER,
+  cached_tokens INTEGER,
   duration_ms INTEGER,
   actor_id TEXT REFERENCES users(id),
   created_at TEXT NOT NULL

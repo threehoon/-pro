@@ -383,6 +383,8 @@ export interface InterviewCalendarSyncResult {
     skipped?: boolean;
     error?: string | null;
     meetingUrl?: string | null;
+    /** 自动补同步跳过时的原因，手动同步为空。 */
+    reason?: "not_configured" | "draft" | "not_scheduled" | "in_flight" | "already_synced" | null;
   };
 }
 

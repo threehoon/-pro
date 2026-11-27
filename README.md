@@ -128,7 +128,7 @@ DESIGN.md             # 视觉契约：配色、字体、流动带签名、组�
 1. **身份映射** — `users.feishu_open_id` / `users.feishu_union_id` 已建列；`integrations` 表存在 `feishu` 记录，`GET /api/settings/feishu` 会返回 `ready.login` 供登录方式切换判断。
 2. **通知出站箱** — 阶段变更、面试安排会同时写入 `notifications`（`inapp` + `feishu` 两条，飞书那条默认 `pending`）。飞书未配置时保持 pending，接入后按原顺序幂等补发，不会丢消息也不会重复。
 3. **消息卡片** — `server/src/integrations/feishu.ts` 的 `buildInterviewCard()` 已按飞书 interactive card 结构生成面试通知（含职位/轮次/时间/形式/面试官与跳转按钮），接上 webhook 即可发送。
-4. **日历事件** — `interviews.external_calendar_event_id` 用于保存飞书日历事件 id，面试安排/改期/取消时同步更新。
+4. **日历事件** — `interviews.external_calendar_event_id` 用于保存飞书日历事件 id，面试安排/改期/取消时同步更新。配置好日历之前创建的面试会一直停在未同步，打开面试详情时前端调用 `POST /api/interviews/:id/ensure-calendar` 自动补一次：服务端判断该不该同步，已同步、草稿、已结束、正在同步都直接返回原因（未配置时静默跳过），重复打开不会重复创建日程。
 5. **配置入口** — 设置页「飞书接入」可以直接填写 App ID / App Secret / Verification Token / 机器人 Webhook / 日历 ID，并实时显示三项能力（登录、通知、日历）的就绪状态与待发消息数。
 
 发送函数在未配置或未实现时会**明确返回 `skipped`**，不会伪造成功状态。

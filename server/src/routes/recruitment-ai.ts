@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { activeLlmConfig, llmSettings, parseLlmSettings, saveLlmSettings } from '../integrations/llm.ts';
+import { activeLlmConfig, llmSettings, parseLlmSettings, saveLlmSettings, THINKING_POLICIES } from '../integrations/llm.ts';
 import { badRequest } from '../lib/errors.ts';
 import {
   approveProfile, editProfile, getComposite, getProfile, getScreening, getSummary, manualSummary, putTranscript,
@@ -12,6 +12,7 @@ import { requireAdmin, requireRecruiter, requireUser } from './guard.ts';
 const settingsInput = z.object({
   baseUrl: z.string().trim().max(500).optional(), base_url: z.string().trim().max(500).optional(),
   model: z.string().trim().max(128).optional(), apiKey: z.string().max(1024).optional(), api_key: z.string().max(1024).optional(),
+  thinking: z.enum(THINKING_POLICIES).optional(),
 });
 const profileInput = z.object({ content: z.unknown() });
 const approvalInput = z.object({ profileId: z.string().min(1).max(150).optional() });
@@ -30,7 +31,7 @@ function body<T>(schema: z.ZodType<T>, value: unknown): T {
 
 function settingsBody(input: unknown) {
   const data = body(settingsInput, input);
-  return { baseUrl: data.baseUrl ?? data.base_url, model: data.model, apiKey: data.apiKey ?? data.api_key };
+  return { baseUrl: data.baseUrl ?? data.base_url, model: data.model, apiKey: data.apiKey ?? data.api_key, thinking: data.thinking };
 }
 
 function result<T extends { status?: string; reason?: string; dropped?: number }>(value: T) {

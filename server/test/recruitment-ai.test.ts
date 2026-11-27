@@ -13,7 +13,8 @@ delete process.env.LLM_API_KEY;
 
 const { buildApp } = await import('../src/app.ts');
 const { closeDb, getRow, run, uploadDir } = await import('../src/db/index.ts');
-const { decodeLlmResponse, isPublicAddress, llmTransport, LlmFailure, publicLlmBaseUrl, selectLlmAddress } = await import('../src/integrations/llm.ts');
+const { decodeLlmResponse, isPublicAddress, isStaleSocketFailure, llmTransport, LlmFailure, publicLlmBaseUrl, selectLlmAddress } = await import('../src/integrations/llm.ts');
+const { PROMPT_VERSIONS } = await import('../src/services/ai/prompts.ts');
 const { fallbackProfile, normalizeGeneratedProfile, normalizeProfile, scoreScreening, validateScreening } = await import('../src/services/recruitment-evidence.ts');
 const { now } = await import('../src/lib/util.ts');
 
@@ -21,6 +22,9 @@ let app: Awaited<ReturnType<typeof buildApp>>;
 let adminCookie: string;
 let managerCookie: string;
 const originalTransport = llmTransport.requestJson;
+/** 传输层的用量字段恒定存在：正文之外的思考与缓存明细缺省为 null。 */
+const usage = (tokensIn: number | null, tokensOut: number | null) =>
+  ({ tokensIn, tokensOut, reasoningTokens: null, cachedTokens: null });
 const profile = fallbackProfile('客户成功经理', '大专以上，男优先，25–35 岁', ['续约']);
 const knownQuote = '负责企业客户的续约和交接';
 const fakeQuote = '主动将续约率提升了很多';
@@ -113,11 +117,27 @@ test('only the official DeepSeek HTTPS endpoint accepts a reserved DNS proxy add
   assert.equal(selectLlmAddress(new URL('https://api.example.org/v1'), [publicV4]), publicV4);
 });
 
+test('a pooled connection is replayed only when it dies before the provider answered', () => {
+  for (const code of ['ECONNRESET', 'EPIPE', 'ECONNABORTED'] as const) {
+    assert.equal(isStaleSocketFailure(true, false, code), true, code);
+    // A fresh connection is a real failure, and a request that already has a response may have been billed.
+    assert.equal(isStaleSocketFailure(false, false, code), false, code);
+    assert.equal(isStaleSocketFailure(true, true, code), false, code);
+  }
+  for (const code of ['ETIMEDOUT', 'ENOTFOUND', 'ECONNREFUSED', 'ABORT_ERR', undefined]) {
+    assert.equal(isStaleSocketFailure(true, false, code), false, String(code));
+  }
+});
+
 test('DeepSeek settings use the official model ID and preserve saved keys and custom providers', async () => {
   const defaults = (await inject('GET', '/api/settings/llm')).json().data;
   assert.equal(defaults.baseUrl, 'https://api.deepseek.com');
   assert.equal(defaults.model, 'deepseek-flash');
   assert.equal(defaults.configured, false);
+  // 默认关闭思考：不做任何设置时就是省钱的那一档。
+  assert.equal(defaults.thinking, 'off');
+  assert.equal(defaults.reasoningTokens, 0);
+  assert.equal(defaults.cachedTokens, 0);
 
   const apiKey = ['opaque', 'test', 'flash'].join('-');
   try {
@@ -135,11 +155,18 @@ test('DeepSeek settings use the official model ID and preserve saved keys and cu
     llmTransport.requestJson = async (config) => {
       assert.equal(config.model, 'deepseek-flash');
       assert.equal(config.apiKey, apiKey);
-      return { value: { ok: true }, tokensIn: null, tokensOut: null };
+      return { value: { ok: true }, ...usage(null, null) };
     };
     const probe = await inject('POST', '/api/settings/llm/test', { model: 'deepseek-chat' });
     assert.equal(probe.json().ok, true);
     assert.equal(probe.json().data.model, 'deepseek-flash');
+
+    const opened = await inject('POST', '/api/settings/llm', { thinking: 'on' });
+    assert.equal(opened.json().data.thinking, 'on');
+    assert.equal((await inject('GET', '/api/settings/llm')).json().data.thinking, 'on');
+    const closed = await inject('POST', '/api/settings/llm', { thinking: 'off' });
+    assert.equal(closed.json().data.thinking, 'off');
+    assert.equal((await inject('POST', '/api/settings/llm', { thinking: 'deep' })).statusCode, 400);
 
     const custom = await inject('POST', '/api/settings/llm', { baseUrl: 'https://api.openai.com/v1', model: 'deepseek-chat' });
     assert.equal(custom.statusCode, 200);
@@ -153,13 +180,13 @@ test('DeepSeek settings use the official model ID and preserve saved keys and cu
 
 test('model decoding keeps usage for blank and truncated completions and rejects invalid or secret-bearing output', () => {
   const usage = { prompt_tokens: 12, completion_tokens: 8 };
-  const tokens = { tokensIn: 12, tokensOut: 8 };
+  const tokens = { tokensIn: 12, tokensOut: 8, reasoningTokens: null, cachedTokens: null };
   const reply = (content: string | null, finish_reason = 'stop') => JSON.stringify({
     choices: [{ message: { content }, finish_reason }], usage,
   });
   assert.deepEqual(decodeLlmResponse(reply('{"ready":true}'), ''), { value: { ready: true }, ...tokens });
   assert.deepEqual(decodeLlmResponse('{"choices":[{"message":{"content":"{}"}}],"usage":{"prompt_tokens":"unknown"}}', ''), {
-    value: {}, tokensIn: null, tokensOut: null,
+    value: {}, tokensIn: null, tokensOut: null, reasoningTokens: null, cachedTokens: null,
   });
   for (const [body, code] of [
     [reply('   '), 'empty_response'],
@@ -215,13 +242,14 @@ test('creating a title-only job queues an AI portrait and clearly reports a blan
       assert.equal(parsedExample.trait_match.code, 'B');
       assert.match(parsedExample.technical[0][4], /能独立处理常见故障/);
       assert.equal(options?.maxTokens, 5200);
-      assert.equal(options?.deepSeekThinking, calls % 2 ? 'disabled' : 'enabled');
+      // 首次按设置关闭思考，失败重试才放开。
+      assert.equal(options?.thinking, calls % 2 ? 'disabled' : 'enabled');
       assert.ok(options && options.timeoutMs! > 0 && options.timeoutMs! <= 45_000);
       if (calls <= 2) throw new LlmFailure('empty_response', { tokensIn: 22, tokensOut: 5 });
-      if (calls === 3) return { value: { ...compactDraft, background: undefined }, tokensIn: 22, tokensOut: 1200 };
-      if (calls === 4) return { value: { ...compactDraft, technical: competencies[2]?.map(row => row.slice(0, 6)) }, tokensIn: 22, tokensOut: 1200 };
+      if (calls === 3) return { value: { ...compactDraft, background: undefined }, ...usage(22, 1200) };
+      if (calls === 4) return { value: { ...compactDraft, technical: competencies[2]?.map(row => row.slice(0, 6)) }, ...usage(22, 1200) };
       if (calls === 5) throw new LlmFailure('malformed_json', { tokensIn: 22, tokensOut: 1160 });
-      return { value: compactDraft, tokensIn: 22, tokensOut: 1200 };
+      return { value: compactDraft, ...usage(22, 1200) };
     };
     const created = await inject('POST', '/api/jobs', { title });
     assert.equal(created.statusCode, 201);
@@ -230,10 +258,15 @@ test('creating a title-only job queues an AI portrait and clearly reports a blan
     const failed = await waitFor(url, 'failed');
     assert.match(failed.reason, /返回了空内容/);
     assert.equal(failed.data.profile.status, 'failed');
-    const failedRun = getRow<{ error: string; tokens_in: number; tokens_out: number }>(
-      'SELECT error, tokens_in, tokens_out FROM ai_runs WHERE subject_id = ?', [id],
+    const failedRun = getRow<{ error: string; tokens_in: number; tokens_out: number; prompt_version: string }>(
+      'SELECT error, tokens_in, tokens_out, prompt_version FROM ai_runs WHERE subject_id = ?', [id],
     );
-    assert.deepEqual({ ...failedRun }, { error: 'empty_response', tokens_in: 44, tokens_out: 10 });
+    assert.deepEqual(
+      { error: failedRun?.error, tokens_in: failedRun?.tokens_in, tokens_out: failedRun?.tokens_out },
+      { error: 'empty_response', tokens_in: 44, tokens_out: 10 },
+    );
+    // 每次调用都写下提示词版本，才能按版本对比耗时与质量。
+    assert.equal(failedRun?.prompt_version, PROMPT_VERSIONS.profile);
     assert.equal((await inject('POST', `${url}/generate`)).statusCode, 200);
     const invalid = await waitFor(url, 'failed');
     assert.equal(invalid.data.profile.version, 2);
@@ -252,6 +285,19 @@ test('creating a title-only job queues an AI portrait and clearly reports a blan
       'SELECT tokens_in, tokens_out FROM ai_runs WHERE subject_id = ? AND status = ?', [id, 'ok'],
     );
     assert.deepEqual({ ...readyRun }, { tokens_in: 44, tokens_out: 2360 });
+
+    // 同一输入再次生成直接命中缓存：不调用模型、不重复计费，并留下可统计的命中记录。
+    assert.equal((await inject('POST', `${url}/generate`)).statusCode, 200);
+    await waitFor(url, 'ready');
+    assert.equal(calls, 6);
+    const hits = getRow<{ n: number; status: string }>(
+      "SELECT COUNT(*) AS n, MIN(status) AS status FROM ai_runs WHERE subject_id = ? AND error = 'cache_hit'", [id],
+    );
+    assert.deepEqual({ ...hits }, { n: 1, status: 'skipped' });
+    // 命中记录不延长缓存窗口：再点一次仍然命中，而不是重新调用模型。
+    assert.equal((await inject('POST', `${url}/generate`)).statusCode, 200);
+    await waitFor(url, 'ready');
+    assert.equal(calls, 6);
   } finally {
     llmTransport.requestJson = originalTransport;
     run("DELETE FROM integrations WHERE provider = 'llm'");
@@ -311,7 +357,7 @@ test('screening follows the approved profile version, preserves history and audi
     return { value: { labels: [{ indicator: '背景度', label, level: 'B', quote: knownQuote },
       { indicator: '背景度', label: profile.indicators[0]!.labels[1]!.name, level: 'A', quote: fakeQuote }],
       resume_excerpts: [{ quote: knownQuote }],
-    }, tokensIn: 20, tokensOut: 5 };
+    }, ...usage(20, 5) };
   };
   assert.equal((await inject('PUT', jobPath, { content: profile })).json().data.profile.status, 'draft');
   await inject('POST', `${appPath}/screen`);
@@ -458,12 +504,14 @@ test('transcript retry validates quotes and triggers verified composite, with ma
     if (instruction.includes('比较一轮')) return { value: {
       headline: '两轮均讨论客户工作', confirmed: [{ point: '负责续约', from: [1], evidence: [{ round: 1, quote: knownQuote }] },
         { point: '未经验证', from: [2], evidence: [{ round: 2, quote: fakeQuote }] }],
-    }, tokensIn: 1, tokensOut: 1 };
+    }, ...usage(1, 1) };
     calls++;
-    if (calls === 1) throw new LlmFailure('timeout');
+    // 用不可重试的服务商错误，才能保留「失败 → 人工重试」这条流程；
+    // 单次超时现在会自动降级重试，见后面的自动重试用例。
+    if (calls === 1) throw new LlmFailure('provider_error');
     const quote = JSON.parse(input).transcript.includes(knownQuote) ? knownQuote : '有跨部门协调和风险上报的真实案例';
     return { value: { headline: '已讨论日常工作', highlights: [{ point: '描述工作职责', quote },
-      { point: '未经证实的业绩', quote: fakeQuote }], suggested: 'advance' }, tokensIn: 5, tokensOut: 1 };
+      { point: '未经证实的业绩', quote: fakeQuote }], suggested: 'advance' }, ...usage(5, 1) };
   };
   assert.equal((await inject('PUT', `${firstPath}/transcript`, { transcript: '过短的转写' })).json().ok, true);
   assert.equal((await inject('GET', `${firstPath}/summary`)).json().data.status, 'none');
@@ -496,12 +544,12 @@ test('a revised first-round summary invalidates an in-flight second-round result
   const previousHeadlines: unknown[] = [];
   const quote = '有跨部门协调和风险上报的真实案例';
   llmTransport.requestJson = async (_config, _instruction, input) => {
-    previousHeadlines.push(JSON.parse(JSON.parse(input).previous).headline);
+    previousHeadlines.push(JSON.parse(input).previous.headline);
     if (previousHeadlines.length === 1) {
       signalStarted();
       await held;
     }
-    return { value: { headline: '已讨论跨部门协调', highlights: [{ point: '跨部门协调', quote }] }, tokensIn: 1, tokensOut: 1 };
+    return { value: { headline: '已讨论跨部门协调', highlights: [{ point: '跨部门协调', quote }] }, ...usage(1, 1) };
   };
   const active = await inject('PUT', `${secondPath}/transcript`, { transcript: `${interviewTwo}补充说明。` });
   assert.equal(active.json().data.summaryStatus, 'generating');
@@ -519,6 +567,26 @@ test('a revised first-round summary invalidates an in-flight second-round result
   await waitFor(`${appPath}/composite`, 'manual');
 });
 
+
+test('one summary timeout retries with a smaller budget instead of failing', async () => {
+  const seen: Array<{ maxTokens?: number; timeoutMs?: number }> = [];
+  let calls = 0;
+  llmTransport.requestJson = async (_config, _instruction, input, options) => {
+    calls++;
+    seen.push({ maxTokens: options?.maxTokens, timeoutMs: options?.timeoutMs });
+    if (calls === 1) throw new LlmFailure('timeout', usage(30, 0));
+    const quote = JSON.parse(input).transcript.includes(knownQuote) ? knownQuote : '有跨部门协调和风险上报的真实案例';
+    return { value: { headline: '自动重试后成功', highlights: [{ point: '描述工作职责', quote }], suggested: 'advance' },
+      ...usage(60, 210) };
+  };
+  const queued = await inject('PUT', `${secondPath}/transcript`, { transcript: `${interviewTwo}补充一段自动重试说明。` });
+  assert.equal(queued.json().data.summaryStatus, 'generating');
+  const done = await waitFor(`${secondPath}/summary`, 'ready');
+  assert.equal(done.data.summary.headline, '自动重试后成功');
+  assert.equal(calls, 2);
+  assert.deepEqual(seen.map((item) => item.maxTokens), [2200, 1500]);
+  assert.ok(seen.every((item) => (item.timeoutMs ?? 0) <= 22_000));
+});
 
 test('job resume import requires a confirmed portrait, deduplicates atomically and queues real screening inputs', async () => {
   const jobId = 'resume-import-job';
@@ -570,7 +638,7 @@ test('job resume import requires a confirmed portrait, deduplicates atomically a
          { quote: fakeQuote },
          { quote: 'direct-upload@example.com' },
          { quote: lateQuote },
-       ] }, tokensIn: 20, tokensOut: 5 };
+       ] }, ...usage(20, 5) };
   };
   try {
     const responses = await Promise.all([upload(file(resume)), upload(file(resume))]);
@@ -819,7 +887,7 @@ test('rich job metadata flows into AI portrait generation input and round-trips 
   try {
     llmTransport.requestJson = async (_config, _instruction, input) => {
       receivedJd = JSON.parse(input).jd;
-      return { value: compact, tokensIn: 120, tokensOut: 980 };
+      return { value: compact, ...usage(120, 980) };
     };
     const created = await inject('POST', '/api/jobs', {
       title: '产品经理',

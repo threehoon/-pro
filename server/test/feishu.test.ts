@@ -2625,3 +2625,156 @@ function readCalendarRow(interviewId: string) {
     [interviewId],
   );
 }
+
+test('打开面试详情自动补同步：历史未同步记录补一次，重复调用不再请求飞书，未配置时静默跳过', async () => {
+  const { run } = await import('../src/db/index.ts');
+  const adminUserId = await getUserIdByCookie(adminCookie);
+  const recruiterUserId = await getUserIdByCookie(recruiterCookie);
+  run('UPDATE users SET feishu_open_id = ? WHERE id = ?', ['ou_ensure_admin', adminUserId]);
+  run('UPDATE users SET feishu_open_id = ? WHERE id = ?', ['ou_ensure_recruiter', recruiterUserId]);
+
+  const calendarId = 'feishu.cn_ensure_auto@group.calendar.feishu.cn';
+  const webhookUrl = 'https://open.feishu.cn/open-apis/bot/v2/hook/ensure-auto-hook';
+  const saveRes = await app.inject({
+    method: 'PUT',
+    url: '/api/settings/feishu',
+    headers: { cookie: adminCookie },
+    payload: {
+      app_id: 'cli_ensure_auto',
+      app_secret: 'sec_ensure_auto',
+      bot_webhook: webhookUrl,
+      bot_secret: '',
+      calendar_id: calendarId,
+    },
+  });
+  assert.equal(saveRes.statusCode, 200);
+  await app.inject({
+    method: 'POST',
+    url: '/api/notifications/feishu/skip-pending',
+    headers: { cookie: adminCookie },
+    payload: {},
+  });
+
+  const calls: Array<{ method: string; url: string }> = [];
+  setFeishuFetchForTest(async (input, init) => {
+    const url = String(input);
+    const method = String(init?.method ?? 'GET');
+    calls.push({ method, url });
+    if (url.endsWith('/open-apis/auth/v3/tenant_access_token/internal')) {
+      return jsonResponse({ code: 0, msg: 'ok', tenant_access_token: 't-ensure-auto', expire: 7200 });
+    }
+    if (url === webhookUrl) return jsonResponse({ code: 0, msg: 'success' });
+    if (method === 'POST' && url.includes('/open-apis/im/v1/messages?receive_id_type=open_id')) {
+      return jsonResponse({ code: 0, msg: 'ok', data: { message_id: `om_ensure_${calls.length}` } });
+    }
+    if (method === 'POST' && url.endsWith(`/open-apis/calendar/v4/calendars/${encodeURIComponent(calendarId)}/events`)) {
+      return jsonResponse({
+        code: 0,
+        msg: 'ok',
+        data: { event: { event_id: 'evt_ensure_001', vchat: { vc_type: 'vc', meeting_url: 'https://vc.feishu.cn/j/ensure001' } } },
+      });
+    }
+    if (method === 'POST' && url.includes('/events/evt_ensure_001/attendees?user_id_type=open_id')) {
+      return jsonResponse({ code: 0, msg: 'ok', data: { attendees: [] } });
+    }
+    throw new Error(`unexpected feishu call: ${method} ${url}`);
+  });
+
+  const applicationId = await setupInterviewApplication('自动补同步测试岗', '李自动', 'li-auto@example.com');
+  const createItv = await app.inject({
+    method: 'POST',
+    url: '/api/interviews',
+    headers: { cookie: adminCookie },
+    payload: {
+      applicationId,
+      scheduledAt: '2026-12-02T06:00:00.000Z',
+      durationMinutes: 45,
+      mode: 'video',
+      interviewerId: adminUserId,
+    },
+  });
+  assert.equal(createItv.statusCode, 201);
+  const interviewId = createItv.json().interview.id as string;
+  await waitForCalendarSyncs();
+  await waitForFeishuDispatches();
+
+  // 模拟「飞书日历配好之前创建、一直停在 none」的历史记录
+  run(
+    `UPDATE interviews SET calendar_sync_status = 'none', calendar_synced_at = NULL,
+       external_calendar_event_id = NULL, meeting_url = NULL, calendar_attendees_json = '[]'
+       WHERE id = ?`,
+    [interviewId],
+  );
+  calls.length = 0;
+
+  // 1) 打开详情触发自动补同步：真正写入日程并回写状态
+  const first = await app.inject({
+    method: 'POST',
+    url: `/api/interviews/${interviewId}/ensure-calendar`,
+    headers: { cookie: adminCookie },
+  });
+  assert.equal(first.statusCode, 200);
+  const firstBody = first.json() as {
+    interview: { calendar_sync_status: string; external_calendar_event_id: string | null; meeting_url: string | null };
+    sync: { ok: boolean; skipped?: boolean; reason?: string | null };
+  };
+  assert.equal(firstBody.sync.ok, true);
+  assert.equal(firstBody.sync.skipped, false);
+  assert.equal(firstBody.interview.calendar_sync_status, 'synced');
+  assert.equal(firstBody.interview.external_calendar_event_id, 'evt_ensure_001');
+  assert.equal(firstBody.interview.meeting_url, 'https://vc.feishu.cn/j/ensure001');
+  assert.equal(calls.filter((call) => call.method === 'POST' && call.url.endsWith('/events')).length, 1);
+
+  // 2) 再次打开（刷新后重进）不重复建日程，也不产生任何飞书请求
+  calls.length = 0;
+  const second = await app.inject({
+    method: 'POST',
+    url: `/api/interviews/${interviewId}/ensure-calendar`,
+    headers: { cookie: recruiterCookie },
+  });
+  assert.equal(second.statusCode, 200);
+  assert.equal(second.json().sync.skipped, true);
+  assert.equal(second.json().sync.reason, 'already_synced');
+  assert.equal(calls.length, 0);
+
+  // 3) 已完成/已取消的面试不再补同步
+  run(`UPDATE interviews SET status = 'completed' WHERE id = ?`, [interviewId]);
+  const finished = await app.inject({
+    method: 'POST',
+    url: `/api/interviews/${interviewId}/ensure-calendar`,
+    headers: { cookie: adminCookie },
+  });
+  assert.equal(finished.statusCode, 200);
+  assert.equal(finished.json().sync.reason, 'not_scheduled');
+
+  // 4) 没配共享日历时静默跳过，而不是报错打断详情页
+  const clearRes = await app.inject({
+    method: 'PUT',
+    url: '/api/settings/feishu',
+    headers: { cookie: adminCookie },
+    payload: {
+      app_id: 'cli_ensure_auto',
+      app_secret: 'sec_ensure_auto',
+      bot_webhook: webhookUrl,
+      bot_secret: '',
+      calendar_id: '',
+    },
+  });
+  assert.equal(clearRes.statusCode, 200);
+  const missing = await app.inject({
+    method: 'POST',
+    url: `/api/interviews/${interviewId}/ensure-calendar`,
+    headers: { cookie: adminCookie },
+  });
+  assert.equal(missing.statusCode, 200);
+  assert.equal(missing.json().sync.skipped, true);
+  assert.equal(missing.json().sync.reason, 'not_configured');
+
+  // 5) 不存在或没权限的面试仍按原规则报错
+  const ghost = await app.inject({
+    method: 'POST',
+    url: '/api/interviews/itv_not_exists/ensure-calendar',
+    headers: { cookie: adminCookie },
+  });
+  assert.equal(ghost.statusCode, 404);
+});

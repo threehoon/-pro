@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Badge, Button, ErrorState, Field, Input, ListSkeleton, Modal, Select, Textarea, useConfirm } from "../ui";
 import { api } from "../../lib/api";
 import { fmtDateTime, interviewTitle } from "../../lib/format";
@@ -11,6 +11,20 @@ import { ArchiveReasonField, defaultArchiveReason } from "./ArchiveReasonField";
 const summaryLabels: Record<AiStatus, string> = { none: "待总结", generating: "总结生成中", ready: "总结已就绪", failed: "总结失败", manual: "人工结论" };
 const decisions = { advance: "进入复试", negotiate: "进入谈薪", reject: "归档投递" } as const;
 const finished = (status: AiStatus | undefined) => status === "ready" || status === "manual";
+
+/** 生成期间显示已等待时长：一句不动的文案会让人以为卡死。 */
+function ProgressStatus({ label, estimate }: { label: string; estimate: string }) {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    const timer = setInterval(() => setSeconds((value) => value + 1), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  return (
+    <p className="muted" role="status">
+      {label} · 已等待 {seconds} 秒（{estimate}）
+    </p>
+  );
+}
 
 export function InterviewDrawer({ interview, canWrite, rejectionReasons, onClose, onChange }: { interview: Interview; canWrite: boolean; rejectionReasons: string[]; onClose: () => void; onChange: () => void }) {
   const [poll, setPoll] = useState(false);
@@ -25,6 +39,11 @@ export function InterviewDrawer({ interview, canWrite, rejectionReasons, onClose
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [liveInterview, setLiveInterview] = useState<Interview>(interview);
+  const [autoSyncing, setAutoSyncing] = useState(false);
+  // 服务端说还没配置共享日历时就不再显示「未同步」和同步按钮，免得每次点都报错
+  const [calendarOff, setCalendarOff] = useState(false);
+  // 每次打开详情最多自动补同步一次，失败后交给手动按钮，避免反复调用飞书
+  const autoSynced = useRef<string | null>(null);
   // 父级刷新后传入新行时同步本地快照，避免日历徽标与会议链接停留在旧状态
   useEffect(() => {
     setLiveInterview(interview);
@@ -83,7 +102,41 @@ export function InterviewDrawer({ interview, canWrite, rejectionReasons, onClose
     });
   }
 
-  const calBadge = calendarSyncBadge(liveInterview.calendar_sync_status);
+  // 打开详情时自动补同步：飞书日历配好之前创建的面试会一直停在 none，以前每次都还要手点一次
+  useEffect(() => {
+    if (!canWrite) return;
+    const target = liveInterview;
+    if (target.is_draft || target.status !== "scheduled") return;
+    if (target.calendar_sync_status !== "none" && target.calendar_sync_status !== "failed") return;
+    if (autoSynced.current === target.id) return;
+    autoSynced.current = target.id;
+    setAutoSyncing(true);
+    void (async () => {
+      try {
+        const res = await api.ensureInterviewCalendar(target.id);
+        setLiveInterview(res.interview);
+        if (res.sync.ok && !res.sync.skipped) {
+          setNotice("已自动同步飞书日历。");
+          onChange();
+        } else if (res.sync.reason === "not_configured") {
+          setCalendarOff(true);
+        } else if (res.sync.error) {
+          setError(`日历自动同步失败：${res.sync.error}`);
+        }
+      } catch (err) {
+        setError(apiMessage(err, "日历自动同步失败"));
+      } finally {
+        setAutoSyncing(false);
+      }
+    })();
+  }, [canWrite, liveInterview, onChange]);
+
+  const calBadge = autoSyncing
+    ? calendarSyncBadge("pending")
+    : calendarSyncBadge(liveInterview.calendar_sync_status) ??
+      (!calendarOff && liveInterview.status === "scheduled" && !liveInterview.is_draft
+        ? { label: "未同步飞书日历", tone: "neutral" as const }
+        : null);
   const meetingUrl = liveInterview.status === "cancelled" ? null : safeMeetingUrl(liveInterview.meeting_url);
 
   async function syncCalendar() {
@@ -127,8 +180,10 @@ export function InterviewDrawer({ interview, canWrite, rejectionReasons, onClose
             )}
           </div>
           {canWrite && calBadge && (
-            <Button size="sm" loading={busy === "calendar"} disabled={!!busy} onClick={() => void syncCalendar()}>
-              {liveInterview.calendar_sync_status === "failed" ? "重试同步日历" : "重新同步日历"}
+            <Button size="sm" loading={busy === "calendar" || autoSyncing} disabled={!!busy || autoSyncing}
+              onClick={() => void syncCalendar()}>
+              {liveInterview.calendar_sync_status === "failed" ? "重试同步日历"
+                : liveInterview.calendar_sync_status === "none" ? "同步日历" : "重新同步日历"}
             </Button>
           )}
           {liveInterview.calendar_sync_status === "failed" && liveInterview.calendar_sync_error && (
@@ -140,13 +195,13 @@ export function InterviewDrawer({ interview, canWrite, rejectionReasons, onClose
       )}
       {!resource.data && !resource.error && <ListSkeleton rows={2} />}
       {resource.error && <ErrorState message={resource.error} onRetry={resource.reload} />}
-      {pollPlan && <p className="muted" role="status">正在准备本轮提问提纲…</p>}
+      {pollPlan && <ProgressStatus label="正在准备本轮提问提纲" estimate="通常 3–10 秒" />}
       {data?.plan?.questions?.length ? <details className="workflow-disclosure"><summary>本轮提问提纲</summary><ol className="workflow-evidence">
         {data.plan.questions.map((item, i) => <li key={i}><strong>{item.question}</strong><p className="muted">关注：{item.listen_for}</p><p>追问：{item.follow_up}</p></li>)}
       </ol></details> : null}
       {!interview.is_draft && <section className="workflow-stack">
         <div className="workflow-section-head"><h3>本轮总结</h3><Badge tone={status === "failed" ? "danger" : finished(status) ? "brand" : "neutral"}>{summaryLabels[status]}</Badge></div>
-        {status === "generating" && <p className="muted" role="status">正在从逐字稿提取证据…</p>}
+        {status === "generating" && <ProgressStatus label="正在从逐字稿提取证据" estimate="通常 5–15 秒" />}
         {status === "failed" && <p className="form-error" role="alert">{resource.data?.reason || "总结生成失败，可以重试或写一句结论。"}</p>}
         {summary && <div className="workflow-stack">
           {(summary.headline || summary.conclusion) && <p className="workflow-lead">{summary.headline || summary.conclusion}</p>}
@@ -186,7 +241,7 @@ export function InterviewDrawer({ interview, canWrite, rejectionReasons, onClose
         {!compositeResource.data && !compositeResource.error && <ListSkeleton rows={1} />}
         {compositeResource.error && <ErrorState message={compositeResource.error} onRetry={compositeResource.reload} />}
         {compositeData?.status === "none" && <p className="muted">本轮总结就绪后自动生成综合评估。</p>}
-        {pollComposite && <p className="muted" role="status">正在综合两轮面试记录…</p>}
+        {pollComposite && <ProgressStatus label="正在综合两轮面试记录" estimate="通常 5–15 秒" />}
         {compositeData?.status === "failed" && <p className="form-error" role="alert">{compositeResource.data?.reason || "综合评估生成失败。"}</p>}
         {composite?.headline && <p className="workflow-lead">{composite.headline}</p>}
         {composite?.rounds?.map((round) => <p key={round.round}>第 {round.round} 轮 · {round.headline}</p>)}

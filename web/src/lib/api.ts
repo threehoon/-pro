@@ -244,6 +244,9 @@ export const api = {
   noShow: (id: string) => request<{ interview: Interview }>("POST", `/interviews/${id}/no-show`),
   syncInterviewCalendar: (id: string) =>
     request<import("../types").InterviewCalendarSyncResult>("POST", `/interviews/${id}/sync-calendar`, {}),
+  /** 打开面试详情时自动补同步：服务端判断该不该同步，重复调用不会重建日程。 */
+  ensureInterviewCalendar: (id: string) =>
+    request<import("../types").InterviewCalendarSyncResult>("POST", `/interviews/${id}/ensure-calendar`, {}),
 
   notifications: (options: { channel?: string; limit?: number } = {}) =>
     request<{ items: import("../types").NotificationItem[]; stats: Record<string, number> }>(
@@ -255,7 +258,7 @@ export const api = {
     signal?: AbortSignal,
   ) => request<FeishuOutboxPage>("GET", `/notifications${qs({ channel: "feishu", ...filters })}`, undefined, { signal }),
   llmConfig: () => request<AiResult<LlmConfig>>("GET", "/settings/llm"),
-  saveLlmConfig: (input: { baseUrl: string; model: string; apiKey?: string }) =>
+  saveLlmConfig: (input: { baseUrl: string; model: string; apiKey?: string; thinking?: "off" | "on" }) =>
     request<AiResult<LlmConfig>>("POST", "/settings/llm", input),
   testLlm: () => request<AiResult<{ latencyMs: number; model: string }>>("POST", "/settings/llm/test"),
   feishu: () => request<FeishuStatus>("GET", "/settings/feishu"),

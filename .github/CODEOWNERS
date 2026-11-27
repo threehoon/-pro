@@ -1,38 +1,40 @@
-# 代码归属：用于 PR 自动指派 reviewer（配合分支保护的「Require review from Code Owners」）
+# 代码归属：PR 打开后自动指派 reviewer（配合分支保护的「Require review from Code Owners」）
 #
-# 需要做的两件事：
-# 1. 把 @threehoon 换成你自己的 GitHub 用户名（仓库当前所有者为 threehoon）。
-# 2. 拿到同事的 GitHub 用户名后，取消下面「AI / 画像」区块的注释并替换 @partner-handle。
-#
-# 在未确认同事用户名之前，全部路径先归到你名下，避免 GitHub 报「找不到代码所有者」而卡住合并。
+# 两个负责人：
+#   @threehoon      —— 框架、数据库、权限、飞书、出站箱、样式
+#   @luy96005-prog  —— AI 提示词、模型传输、画像与总结的生成质量
 
-# 默认：所有文件由你（框架负责人）兜底审查
+# 默认：所有文件由框架负责人兜底审查
 *                                   @threehoon
 
-# ---- AI / 画像 区块：同事接手后取消注释，把 @partner-handle 换成他的 GitHub 用户名 ----
-# /server/src/services/ai/                @partner-handle
-# /server/src/integrations/llm.ts         @partner-handle
-# /server/src/services/recruitment-evidence.ts @partner-handle
-# /server/src/services/resume-parser.ts   @partner-handle
-# /server/src/routes/recruitment-ai.ts    @partner-handle
-# /server/test/recruitment-ai.test.ts     @partner-handle
-# /server/test/parser.test.ts             @partner-handle
-# /web/src/components/workflow/ScreeningPanel.tsx  @partner-handle
-# /web/src/components/workflow/JobProfilePanel.tsx @partner-handle
-# /web/src/components/workflow/ResumeImport.tsx    @partner-handle
-# /web/src/pages/JobWorkspacePage.tsx     @partner-handle
+# ---- AI / 画像 区块：归 @luy96005-prog ----
+/server/src/services/ai/                     @luy96005-prog
+/server/src/integrations/llm.ts              @luy96005-prog
+/server/src/services/recruitment-evidence.ts @luy96005-prog
+/server/src/services/resume-parser.ts        @luy96005-prog
+/server/src/routes/recruitment-ai.ts         @luy96005-prog
+/server/test/recruitment-ai.test.ts          @luy96005-prog
+/server/test/parser.test.ts                  @luy96005-prog
+/web/src/components/workflow/ScreeningPanel.tsx  @luy96005-prog
+/web/src/components/workflow/JobProfilePanel.tsx @luy96005-prog
+/web/src/components/workflow/ResumeImport.tsx    @luy96005-prog
+/web/src/pages/JobWorkspacePage.tsx          @luy96005-prog
+/scripts/ai-bench.mjs                        @luy96005-prog
 
-# ---- AI 调度与状态机：始终由框架侧审（队列、去重、写库） ----
-/server/src/services/recruitment-ai.ts @threehoon
+# ---- AI 调度与状态机：队列、去重、状态机、写库，始终由框架侧审 ----
+/server/src/services/recruitment-ai.ts       @threehoon
 
-# ---- 框架 / 基础设施：始终由你审 ----
+# ---- 框架 / 基础设施：始终由框架侧审 ----
 /server/src/db/                     @threehoon
 /server/src/auth.ts                 @threehoon
 /server/src/app.ts                  @threehoon
 /server/src/routes/guard.ts         @threehoon
 /server/src/integrations/feishu.ts  @threehoon
 /server/src/services/notifications.ts @threehoon
+/server/src/services/audit.ts       @threehoon
 /web/src/App.tsx                    @threehoon
 /web/src/styles/                    @threehoon
 /web/src/components/ui.tsx          @threehoon
+/web/src/types.ts                   @threehoon
+/web/src/lib/api.ts                 @threehoon
 /.github/                           @threehoon

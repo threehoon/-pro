@@ -263,3 +263,61 @@ CREATE TABLE IF NOT EXISTS ai_runs (
 CREATE INDEX IF NOT EXISTS idx_ai_runs_created ON ai_runs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ai_runs_hash ON ai_runs(input_hash, kind, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_ai_runs_subject ON ai_runs(kind, subject_id, created_at DESC);
+-- 多维表格双向同步：配置、实体映射、出站队列、入站事件
+CREATE TABLE IF NOT EXISTS bitable_config (
+  id                    TEXT PRIMARY KEY,
+  app_token             TEXT,
+  interviews_table_id   TEXT,
+  applications_table_id TEXT,
+  fields_json           TEXT NOT NULL DEFAULT '{}',
+  enabled               INTEGER NOT NULL DEFAULT 0,
+  fallback_minutes      INTEGER NOT NULL DEFAULT 0,
+  subscribed_at         TEXT,
+  last_event_at         TEXT,
+  last_reconcile_at     TEXT,
+  updated_by            TEXT REFERENCES users(id),
+  updated_at            TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS bitable_records (
+  entity_type TEXT NOT NULL,
+  entity_id   TEXT NOT NULL,
+  table_id    TEXT NOT NULL,
+  record_id   TEXT NOT NULL,
+  pushed_hash TEXT,
+  pushed_at   TEXT,
+  pulled_hash TEXT,
+  pulled_at   TEXT,
+  state       TEXT NOT NULL DEFAULT 'synced',
+  last_error  TEXT,
+  PRIMARY KEY (entity_type, entity_id)
+);
+CREATE INDEX IF NOT EXISTS idx_bitable_records_table ON bitable_records(table_id, state);
+
+CREATE TABLE IF NOT EXISTS bitable_sync_queue (
+  id              TEXT PRIMARY KEY,
+  entity_type     TEXT NOT NULL,
+  entity_id       TEXT NOT NULL,
+  op              TEXT NOT NULL DEFAULT 'upsert',
+  state           TEXT NOT NULL DEFAULT 'pending',
+  attempts        INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT,
+  error           TEXT,
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bitable_queue_state ON bitable_sync_queue(state, next_attempt_at);
+
+CREATE TABLE IF NOT EXISTS bitable_events (
+  event_id         TEXT PRIMARY KEY,
+  table_id         TEXT,
+  record_id        TEXT,
+  action           TEXT,
+  operator_open_id TEXT,
+  payload_json     TEXT NOT NULL,
+  state            TEXT NOT NULL DEFAULT 'pending',
+  note             TEXT,
+  received_at      TEXT NOT NULL,
+  applied_at       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_bitable_events_state ON bitable_events(state, received_at);

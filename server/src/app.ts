@@ -15,6 +15,7 @@ import { applicationRoutes } from './routes/applications.ts';
 import { interviewRoutes } from './routes/interviews.ts';
 import { workspaceRoutes } from './routes/workspace.ts';
 import { uploadRoutes } from './routes/uploads.ts';
+import { bitableRoutes } from './routes/bitable.ts';
 import { recruitmentAiRoutes } from './routes/recruitment-ai.ts';
 
 interface ClientError {
@@ -97,6 +98,7 @@ export async function buildApp(options: { logger?: boolean } = {}): Promise<Fast
   await app.register(workspaceRoutes);
   await app.register(uploadRoutes);
   await app.register(recruitmentAiRoutes);
+  await app.register(bitableRoutes);
 
   app.get('/api/health', async () => ({ ok: true, time: new Date().toISOString() }));
 

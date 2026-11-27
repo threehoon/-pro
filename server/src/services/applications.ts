@@ -5,6 +5,7 @@ import { badRequest, conflict, notFound } from '../lib/errors.ts';
 import type { Stage } from '../constants.ts';
 import { REJECTION_REASONS, STAGES, STAGE_LABELS } from '../constants.ts';
 import { audit } from './audit.ts';
+import { hookBitableSync } from './bitable-sync.ts';
 import { getApprovedProfileVersion, screeningActivity } from './recruitment-ai.ts';
 import { notifyStageChange } from './notifications.ts';
 
@@ -45,7 +46,7 @@ export function createApplication(input: ApplicationInput): ApplicationRow {
   const applicationId = id('app');
   const timestamp = now();
   const recipientId = input.ownerId ?? job.owner_id;
-  return transaction(() => {
+  const created = transaction(() => {
     const candidateId = 'candidateId' in input ? input.candidateId : input.prepareCandidate();
     const candidate = getRow<{ name: string }>('SELECT name FROM candidates WHERE id = ?', [candidateId]);
     if (!candidate) throw notFound('候选人不存在');
@@ -78,6 +79,8 @@ export function createApplication(input: ApplicationInput): ApplicationRow {
     });
     return getApplication(applicationId);
   });
+  hookBitableSync('application', created.id);
+  return created;
 }
 
 export function getApplication(applicationId: string): ApplicationRow {
@@ -98,6 +101,7 @@ export function recordStage(application: ApplicationRow, stage: Stage, actorId: 
   const context = applicationContext(application.id);
   notifyStageChange({ applicationId: application.id, candidateName: context.candidateName, jobTitle: context.jobTitle,
     fromStage: application.stage, toStage: stage, actorId, recipientId: context.ownerId });
+  hookBitableSync('application', application.id);
 }
 
 export function decideScreening(input: {
@@ -150,6 +154,7 @@ export function recordArchive(application: ApplicationRow, actorId: string, reas
   const context = applicationContext(application.id);
   notifyStageChange({ applicationId: application.id, candidateName: context.candidateName, jobTitle: context.jobTitle,
     fromStage: application.stage, toStage: null, actorId, recipientId: context.ownerId, rejected: true });
+  hookBitableSync('application', application.id);
 }
 
 export function rejectApplication(input: {
@@ -193,6 +198,7 @@ export function reopenApplication(input: {
     entityType: 'application',
     entityId: input.applicationId,
   });
+  hookBitableSync('application', input.applicationId);
   return getApplication(input.applicationId);
 }
 
@@ -204,6 +210,7 @@ export function addNote(input: { applicationId: string; note: string; actorId: s
      VALUES (?, ?, ?, ?, 'note', ?, ?, ?)`,
     [id('evt'), input.applicationId, application.stage, application.stage, input.note.trim(), input.actorId, now()],
   );
+  hookBitableSync('application', input.applicationId);
 }
 
 export function applicationContext(applicationId: string): {

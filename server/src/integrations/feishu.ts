@@ -337,6 +337,13 @@ export function isFeishuAppConfigured(): boolean {
   return Boolean(config.app_id && config.app_secret);
 }
 
+/** 长连接（WSClient）要自己拿应用凭证建连，这里只给内部调用方用，不对外暴露。 */
+export function feishuAppCredentials(): { appId: string; appSecret: string } | null {
+  const { config } = readRaw();
+  if (!config.app_id || !config.app_secret) return null;
+  return { appId: config.app_id, appSecret: config.app_secret };
+}
+
 export function isFeishuCalendarConfigured(): boolean {
   const { config } = readRaw();
   return Boolean(config.app_id && config.app_secret && config.calendar_id?.trim());
@@ -988,7 +995,7 @@ export async function exchangeFeishuOAuthCode(code: string): Promise<FeishuOAuth
   };
 }
 
-interface TenantApiCallResult {
+export interface TenantApiCallResult {
   ok: boolean;
   status: number;
   code: number | null;
@@ -1001,7 +1008,7 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
 
-async function callFeishuTenantApi(
+export async function callFeishuTenantApi(
   path: string,
   options: {
     method: 'GET' | 'POST' | 'PATCH' | 'DELETE';

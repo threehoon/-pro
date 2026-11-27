@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { activeLlmConfig, llmSettings, parseLlmSettings, saveLlmSettings, THINKING_POLICIES } from '../integrations/llm.ts';
+import { asrSettings, saveAsrSettings } from '../integrations/asr.ts';
 import { badRequest } from '../lib/errors.ts';
 import {
   approveProfile, editProfile, getComposite, getProfile, getScreening, getSummary, manualSummary, putTranscript,
@@ -13,6 +14,11 @@ const settingsInput = z.object({
   baseUrl: z.string().trim().max(500).optional(), base_url: z.string().trim().max(500).optional(),
   model: z.string().trim().max(128).optional(), apiKey: z.string().max(1024).optional(), api_key: z.string().max(1024).optional(),
   thinking: z.enum(THINKING_POLICIES).optional(),
+});
+const asrInput = z.object({
+  baseUrl: z.string().trim().max(500).optional(), base_url: z.string().trim().max(500).optional(),
+  model: z.string().trim().max(128).optional(), apiKey: z.string().max(1024).optional(), api_key: z.string().max(1024).optional(),
+  language: z.string().trim().max(8).optional(),
 });
 const profileInput = z.object({ content: z.unknown() });
 const approvalInput = z.object({ profileId: z.string().min(1).max(150).optional() });
@@ -27,6 +33,11 @@ function body<T>(schema: z.ZodType<T>, value: unknown): T {
   const parsed = schema.safeParse(value);
   if (!parsed.success) throw badRequest('请检查提交的内容');
   return parsed.data;
+}
+
+function asrBody(input: unknown) {
+  const data = body(asrInput, input);
+  return { baseUrl: data.baseUrl ?? data.base_url, model: data.model, apiKey: data.apiKey ?? data.api_key, language: data.language };
 }
 
 function settingsBody(input: unknown) {
@@ -54,6 +65,15 @@ export async function recruitmentAiRoutes(app: FastifyInstance): Promise<void> {
     const actor = requireAdmin(request);
     const config = request.body === undefined ? activeLlmConfig() : parseLlmSettings(settingsBody(request.body));
     return testLlm(actor.id, config?.apiKey ? config : undefined);
+  });
+
+  app.get('/api/settings/asr', async (request) => {
+    requireUser(request);
+    return { ok: true, data: asrSettings() };
+  });
+  app.post('/api/settings/asr', async (request) => {
+    const actor = requireAdmin(request);
+    return { ok: true, data: saveAsrSettings(asrBody(request.body), actor.id) };
   });
 
   app.get<WithId>('/api/jobs/:id/profile', async (request) => {

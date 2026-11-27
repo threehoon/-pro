@@ -7,9 +7,20 @@ import type { Interview } from "../../types";
 import type { AiStatus, ComparativePoint, WorkflowDecision } from "../../workflowTypes";
 import { requireAiResult, useWorkflowResource } from "./resource";
 import { ArchiveReasonField, defaultArchiveReason } from "./ArchiveReasonField";
+import { IconMic, IconUpload } from "../icons";
 
 const summaryLabels: Record<AiStatus, string> = { none: "待总结", generating: "总结生成中", ready: "总结已就绪", failed: "总结失败", manual: "人工结论" };
 const decisions = { advance: "进入复试", negotiate: "进入谈薪", reject: "归档投递" } as const;
+
+/** 这几项由飞书多维表格回写，抽屉里只展示，避免和表格里的编辑互相打架。 */
+const recommendationLabels: Record<string, string> = { strong_yes: "强烈推荐", yes: "推荐", no: "不推荐", strong_no: "明确否决" };
+const advanceLabels: Record<string, string> = { yes: "推荐", hold: "待定", no: "不推荐" };
+const audioAccept = ".mp3,.m4a,.wav,.webm,.ogg,.oga,.aac,.flac,.amr,.mp4,.mov";
+const audioBytes = 20 * 1024 * 1024;
+/** 和 constants.ts 的 AUDIO_EXTENSIONS 保持一致：先在前端挡一次，别让 20 MB 白传一趟。 */
+const audioPattern = /\.(mp3|m4a|wav|webm|ogg|oga|aac|flac|amr|mp4|mov)$/i;
+// 语音输入单次最长 10 分钟：够说一段完整复盘，也不会录出超大文件。
+const dictateLimitSeconds = 600;
 const finished = (status: AiStatus | undefined) => status === "ready" || status === "manual";
 
 /** 生成期间显示已等待时长：一句不动的文案会让人以为卡死。 */
@@ -40,6 +51,15 @@ export function InterviewDrawer({ interview, canWrite, rejectionReasons, onClose
   const [notice, setNotice] = useState("");
   const [liveInterview, setLiveInterview] = useState<Interview>(interview);
   const [autoSyncing, setAutoSyncing] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const audioInput = useRef<HTMLInputElement | null>(null);
+  // 语音输入：直接用麦克风边说边存，停下后交给同一个转写接口，结果进下面的输入框
+  const [dictating, setDictating] = useState(false);
+  const [dictateSeconds, setDictateSeconds] = useState(0);
+  const recorder = useRef<MediaRecorder | null>(null);
+  const recorderChunks = useRef<Blob[]>([]);
+  const dictateTimer = useRef<number | null>(null);
+  const dictateStream = useRef<MediaStream | null>(null);
   // 服务端说还没配置共享日历时就不再显示「未同步」和同步按钮，免得每次点都报错
   const [calendarOff, setCalendarOff] = useState(false);
   // 每次打开详情最多自动补同步一次，失败后交给手动按钮，避免反复调用飞书
@@ -48,6 +68,17 @@ export function InterviewDrawer({ interview, canWrite, rejectionReasons, onClose
   useEffect(() => {
     setLiveInterview(interview);
   }, [interview]);
+  // 关掉抽屉或切换面试时释放麦克风，别让录音一直亮着
+  useEffect(() => () => {
+    const current = recorder.current;
+    if (current) {
+      current.onstop = null;
+      current.stop();
+    }
+    recorder.current = null;
+    releaseMic();
+    clearDictateTimer();
+  }, []);
   const confirm = useConfirm();
   const fetchSummary = useCallback(async () => {
     const result = await api.interviewSummary(interview.id);
@@ -74,6 +105,99 @@ export function InterviewDrawer({ interview, canWrite, rejectionReasons, onClose
   const needsComposite = interview.round > 1 && decision === "negotiate";
   const needsOverride = needsComposite && (compositeData?.status === "none" || compositeData?.status === "failed");
   const waiting = decision !== "reject" && (!finished(status) || (needsComposite && !finished(compositeData?.status) && !needsOverride));
+
+  async function transcribeAudio(file: File) {
+    if (!audioPattern.test(file.name)) {
+      setError("只支持 mp3、m4a、wav、webm 等常见录音格式。");
+      return;
+    }
+    if (file.size > audioBytes) {
+      setError("录音超过 20 MB，请剪短或降低码率后重试。");
+      return;
+    }
+    await run("transcribe", async () => {
+      const result = requireAiResult(await api.transcribeInterview(interview.id, file), "录音转写失败");
+      const merged = source.trim() ? `${source.trimEnd()}\n\n${result.text}` : result.text;
+      setTranscript(merged);
+      const cut = result.truncated ? "（超出 12,000 字的部分已截断）" : "";
+      setNotice(`已转写 ${result.chars.toLocaleString("zh-CN")} 字${cut}，请核对后点「保存逐字稿并生成」。`);
+    });
+  }
+
+  function clearDictateTimer() {
+    if (dictateTimer.current !== null) {
+      window.clearInterval(dictateTimer.current);
+      dictateTimer.current = null;
+    }
+  }
+
+  function releaseMic() {
+    dictateStream.current?.getTracks().forEach((track) => track.stop());
+    dictateStream.current = null;
+  }
+
+  function stopDictate() {
+    recorder.current?.stop();
+  }
+
+  /** 开始语音输入：录音只在浏览器里，停下后立刻上传转写，不落盘。 */
+  async function startDictate() {
+    setError("");
+    setNotice("");
+    if (!window.isSecureContext) {
+      setError("语音输入需要 https 或本机地址（127.0.0.1 / localhost）。用局域网 http 打开时，请改用「选择录音」上传。");
+      return;
+    }
+    if (typeof MediaRecorder === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+      setError("这个浏览器不支持录音，请换 Chrome 或 Edge。");
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      dictateStream.current = stream;
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm")
+        ? "audio/webm"
+        : MediaRecorder.isTypeSupported("audio/mp4") ? "audio/mp4" : "";
+      const rec = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      recorderChunks.current = [];
+      rec.ondataavailable = (event) => {
+        if (event.data.size > 0) recorderChunks.current.push(event.data);
+      };
+      rec.onstop = () => {
+        releaseMic();
+        clearDictateTimer();
+        setDictating(false);
+        const type = rec.mimeType || mimeType || "audio/webm";
+        const blob = new Blob(recorderChunks.current, { type });
+        recorderChunks.current = [];
+        recorder.current = null;
+        if (blob.size === 0) {
+          setError("这段没有录到声音，请检查麦克风后重试。");
+          return;
+        }
+        const suffix = type.includes("mp4") ? "m4a" : "webm";
+        void transcribeAudio(new File([blob], `口述逐字稿.${suffix}`, { type }));
+      };
+      recorder.current = rec;
+      rec.start();
+      setDictating(true);
+      setDictateSeconds(0);
+      const startedAt = Date.now();
+      dictateTimer.current = window.setInterval(() => {
+        const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+        setDictateSeconds(elapsed);
+        if (elapsed >= dictateLimitSeconds) recorder.current?.stop();
+      }, 500);
+    } catch (err) {
+      releaseMic();
+      const name = (err as { name?: string }).name;
+      setError(
+        name === "NotAllowedError" || name === "SecurityError"
+          ? "麦克风权限被拒绝：在浏览器地址栏允许使用麦克风后再试。"
+          : "打不开麦克风，请检查系统录音权限。",
+      );
+    }
+  }
 
   async function run(action: string, task: () => Promise<void>) {
     setBusy(action);
@@ -211,6 +335,34 @@ export function InterviewDrawer({ interview, canWrite, rejectionReasons, onClose
           {summary.suggested && <p><strong>建议：{decisions[summary.suggested]}</strong>{summary.reason && ` · ${summary.reason}`}</p>}
         </div>}
         {(canSummarize || source) && <details className="workflow-disclosure" open={canSummarize && status === "none" ? true : undefined}><summary>面试逐字稿</summary>
+          {canSummarize && <div className={`upload-zone transcript-upload${dragging ? " is-dragging" : ""}`}
+            onDragOver={(event) => { event.preventDefault(); setDragging(true); }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={(event) => {
+              event.preventDefault();
+              setDragging(false);
+              const file = event.dataTransfer.files?.[0];
+              if (file && !busy) void transcribeAudio(file);
+            }}>
+            <div>
+              <strong>录音转写</strong>
+              <p className="muted">可以把面试录音拖到这里，也可以直接对着麦克风口述。转写结果会先进下面的输入框，核对后再生效；录音不会存到服务器上。</p>
+              <p className="muted">支持 mp3、m4a、wav、webm 等，单个不超过 20 MB。</p>
+            </div>
+            <input ref={audioInput} type="file" accept={audioAccept} hidden onChange={(event) => {
+              const file = event.currentTarget.files?.[0];
+              event.currentTarget.value = "";
+              if (file) void transcribeAudio(file);
+            }} />
+            <div className="upload-actions">
+              <Button type="button" icon={<IconUpload size={16} />} loading={busy === "transcribe"} disabled={!!busy || dictating} onClick={() => audioInput.current?.click()}>选择录音</Button>
+              {dictating
+                ? <Button type="button" variant="danger" icon={<IconMic size={16} />} onClick={stopDictate}>停止录音 · {Math.floor(dictateSeconds / 60)}:{String(dictateSeconds % 60).padStart(2, "0")}</Button>
+                : <Button type="button" variant="ghost" icon={<IconMic size={16} />} disabled={!!busy} onClick={() => void startDictate()}>语音输入</Button>}
+            </div>
+          </div>}
+          {dictating && <p className="dictate-status" role="status">正在录音，说完点「停止录音」；单次最长 10 分钟。</p>}
+          {busy === "transcribe" && <ProgressStatus label="正在上传并转写录音" estimate="1 分钟录音通常 10–30 秒" />}
           <Field label="逐字稿" hint={canSummarize ? `当前 ${source.trim().length} 字 · 至少 200 字，超出 12,000 字部分会截断用于生成。` : undefined}>{(id) => <Textarea id={id} rows={8} value={source} readOnly={!canSummarize} onChange={(e) => setTranscript(e.target.value)} />}</Field>
           {canSummarize && <Button loading={busy === "transcript"} disabled={!!busy || !data || source.trim().length < 200 || poll} onClick={() => void run("transcript", async () => {
             const { data: result, reason: hint } = await api.saveTranscript(interview.id, source);
@@ -255,6 +407,11 @@ export function InterviewDrawer({ interview, canWrite, rejectionReasons, onClose
         })}>重试综合评估</Button>}
       </section>}
       {interview.decision && <p className="muted">本轮已决定：{decisions[interview.decision]}</p>}
+      {(interview.recommendation || interview.advance_recommended) && <div className="chip-row bitable-writeback">
+        <span className="muted">表格回写：</span>
+        {interview.recommendation && <Badge tone="neutral">结论 {recommendationLabels[interview.recommendation] ?? interview.recommendation}</Badge>}
+        {interview.advance_recommended && <Badge tone="neutral">进复试 {advanceLabels[interview.advance_recommended] ?? interview.advance_recommended}</Badge>}
+      </div>}
       {error && <p className="form-error" role="alert">{error}</p>}
       {notice && <p role="status">{notice}</p>}
       {canDecide && data && <section className="workflow-stack">

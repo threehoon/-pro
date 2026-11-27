@@ -2741,6 +2741,12 @@ a.status-chip-more:hover {
   background: color-mix(in srgb, var(--brand) 4%, var(--surface));
 }
 
+.upload-zone.is-dragging {
+  border-style: solid;
+  border-color: var(--brand);
+  background: color-mix(in srgb, var(--brand) 7%, var(--surface));
+}
+
 .upload-zone.busy {
   border-style: solid;
   border-color: color-mix(in srgb, var(--brand) 40%, transparent);
@@ -4020,4 +4026,121 @@ a.status-chip-more:hover {
 
 [data-theme="dark"] .badge {
   background: rgba(255, 255, 255, 0.06);
+}
+
+/* 面试录音转写：说明文字允许换行，按钮不被挤压 */
+.transcript-upload p {
+  margin: 2px 0 0;
+  font-size: var(--fs-12);
+  line-height: 1.5;
+}
+
+@media (max-width: 767px) {
+  .transcript-upload {
+    flex-wrap: wrap;
+  }
+
+  .transcript-upload > div {
+    flex-basis: 100%;
+  }
+}
+
+/* 语音输入：选择录音与口述并排，录音中给出可见状态 */
+.upload-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.dictate-status {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-12);
+  color: var(--text-muted);
+}
+
+/* 多维表格双向同步：检查结果、列清单、事件流水 */
+.bitable-checks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.bitable-checks li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: var(--fs-13);
+}
+
+.bitable-columns {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  background: var(--surface-sunken);
+}
+
+.bitable-columns summary {
+  cursor: pointer;
+  font-size: var(--fs-13);
+  font-weight: 600;
+}
+
+.bitable-column-grid {
+  display: grid;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.bitable-column-grid h3 {
+  margin: 0 0 4px;
+  font-size: var(--fs-13);
+}
+
+.bitable-column-grid p {
+  margin: 0;
+  font-size: var(--fs-12);
+  line-height: 1.6;
+  color: var(--ink-2);
+}
+
+.bitable-events h3 {
+  margin: 0 0 8px;
+  font-size: var(--fs-13);
+}
+
+.bitable-events ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.bitable-events li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-12);
+  color: var(--ink-2);
+}
+
+.bitable-event-when {
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-3);
+}
+
+.bitable-event-note {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (min-width: 768px) {
+  .bitable-column-grid {
+    grid-template-columns: 1fr 1fr;
+  }
 }

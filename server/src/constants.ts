@@ -88,3 +88,24 @@ export const DOWNLOAD_MIME: Record<string, string> = {
   '.md': 'text/plain; charset=utf-8',
 };
 export const RESUME_ACCEPT = '.pdf,.docx,.txt,.md';
+
+/**
+ * 面试录音只是转写的中转：上传后立刻送去识别，不落盘也不进库。
+ * 20 MB 是多数语音识别服务的单文件上限，再大就该先剪或用更低的码率。
+ */
+export const AUDIO_MAX_BYTES = 20 * 1024 * 1024;
+export const AUDIO_EXTENSIONS = ['.mp3', '.m4a', '.wav', '.webm', '.ogg', '.oga', '.aac', '.flac', '.amr', '.mp4', '.mov'];
+export const AUDIO_MIME: Record<string, string> = {
+  '.mp3': 'audio/mpeg',
+  '.m4a': 'audio/mp4',
+  '.wav': 'audio/wav',
+  '.webm': 'audio/webm',
+  '.ogg': 'audio/ogg',
+  '.oga': 'audio/ogg',
+  '.aac': 'audio/aac',
+  '.flac': 'audio/flac',
+  '.amr': 'audio/amr',
+  '.mp4': 'audio/mp4',
+  '.mov': 'audio/quicktime',
+};
+export const AUDIO_ACCEPT = '.mp3,.m4a,.wav,.webm,.ogg,.aac,.flac,.amr,.mp4,.mov';

@@ -18,6 +18,8 @@ import {
 } from "../components/ui";
 import { IconArrowUpRight, IconCheck, IconSearch } from "../components/icons";
 
+import { AsrSettings } from "../components/workflow/AsrSettings";
+import { BitableSettings } from "../components/workflow/BitableSettings";
 import { LlmSettings } from "../components/workflow/LlmSettings";
 
 const NOTIFY_STATUS: Record<FeishuOutboxStatus, { label: string; tone: "neutral" | "brand" | "warning" | "danger" }> = {
@@ -271,6 +273,8 @@ export function SettingsPage({
       <PageHeader title="设置" description="管理 AI 模型、飞书接入、团队权限与账号安全。" />
 
       {isAdmin && <LlmSettings />}
+      {isAdmin && <AsrSettings />}
+      {isAdmin && <BitableSettings />}
 
       <Card className="settings-section">
         <header className="card-head">

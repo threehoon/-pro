@@ -9,18 +9,21 @@
 # 默认：所有文件由你（框架负责人）兜底审查
 *                                   @threehoon
 
-# ---- AI / 画像 区块：同事接手后取消注释 ----
-# /server/src/integrations/llm.ts            @partner-handle
-# /server/src/services/recruitment-ai.ts     @partner-handle
+# ---- AI / 画像 区块：同事接手后取消注释，把 @partner-handle 换成他的 GitHub 用户名 ----
+# /server/src/services/ai/                @partner-handle
+# /server/src/integrations/llm.ts         @partner-handle
 # /server/src/services/recruitment-evidence.ts @partner-handle
-# /server/src/services/resume-parser.ts      @partner-handle
-# /server/src/routes/recruitment-ai.ts       @partner-handle
-# /server/test/recruitment-ai.test.ts        @partner-handle
-# /server/test/parser.test.ts                @partner-handle
+# /server/src/services/resume-parser.ts   @partner-handle
+# /server/src/routes/recruitment-ai.ts    @partner-handle
+# /server/test/recruitment-ai.test.ts     @partner-handle
+# /server/test/parser.test.ts             @partner-handle
 # /web/src/components/workflow/ScreeningPanel.tsx  @partner-handle
 # /web/src/components/workflow/JobProfilePanel.tsx @partner-handle
 # /web/src/components/workflow/ResumeImport.tsx    @partner-handle
-# /web/src/pages/JobWorkspacePage.tsx        @partner-handle
+# /web/src/pages/JobWorkspacePage.tsx     @partner-handle
+
+# ---- AI 调度与状态机：始终由框架侧审（队列、去重、写库） ----
+/server/src/services/recruitment-ai.ts @threehoon
 
 # ---- 框架 / 基础设施：始终由你审 ----
 /server/src/db/                     @threehoon

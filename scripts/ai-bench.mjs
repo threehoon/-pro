@@ -5,6 +5,7 @@
 //   npm run bench -- --runs 10        # 多跑几次，p95 更稳
 //   npm run bench -- --job <jobId>    # 用真实职位跑一次完整画像生成（会消耗较多 token）
 //   npm run bench -- --json           # 输出 JSON，方便整段贴进 PR
+//   npm run bench -- --thinking on    # 开思考对照，比较质量与费用（默认 off，与产品默认一致）
 //
 // 复用应用真实的模型配置、地址校验与请求封装，因此量到的就是线上那条路径。
 // 只读，不写 ai_runs、不改任何业务数据。
@@ -22,6 +23,7 @@ const option = (name) => {
 const runs = Math.max(1, Number(option('runs') ?? 5));
 const jobId = option('job');
 const asJson = args.includes('--json');
+const thinking = option('thinking') === 'on' ? 'enabled' : 'disabled';
 
 const config = activeLlmConfig();
 if (!config) {
@@ -48,6 +50,9 @@ const stats = (samples) => {
     maxMs: times.at(-1) ?? null,
     tokensIn: samples.reduce((sum, sample) => sum + (sample.tokensIn ?? 0), 0),
     tokensOut: samples.reduce((sum, sample) => sum + (sample.tokensOut ?? 0), 0),
+    // 思考 token 是输出里不展示的部分，也是费用大头；缓存命中量说明前缀缓存有没有生效。
+    reasoningTokens: samples.reduce((sum, sample) => sum + (sample.reasoningTokens ?? 0), 0),
+    cachedTokens: samples.reduce((sum, sample) => sum + (sample.cachedTokens ?? 0), 0),
     errors: [...new Set(samples.map((sample) => sample.error).filter(Boolean))],
   };
 };
@@ -56,25 +61,26 @@ async function probe(instruction, input, options) {
   const started = performance.now();
   try {
     const answer = await llmTransport.requestJson(config, `${POLICY}\n${instruction}`, input, options);
-    return { ms: Math.round(performance.now() - started), tokensIn: answer.tokensIn, tokensOut: answer.tokensOut };
+    return { ms: Math.round(performance.now() - started), tokensIn: answer.tokensIn, tokensOut: answer.tokensOut,
+      reasoningTokens: answer.reasoningTokens, cachedTokens: answer.cachedTokens };
   } catch (error) {
     return { ms: Math.round(performance.now() - started), error: error instanceof LlmFailure ? error.code : String(error) };
   }
 }
 
-const report = { model: config.model, baseUrl: config.baseUrl, at: new Date().toISOString() };
+const report = { model: config.model, baseUrl: config.baseUrl, thinking, at: new Date().toISOString() };
 
 // 最小请求：把 DNS、TLS 握手与网关往返摊到最清楚，是「连接速度」的主要观测量。
 const ping = [];
 for (let index = 0; index < runs; index++) {
-  ping.push(await probe(testInstruction, '{}', { maxTokens: 256 }));
+  ping.push(await probe(testInstruction, '{}', { maxTokens: 256, thinking }));
 }
 report.ping = stats(ping);
 
 if (jobId) {
   const request = profileRequest(jobId);
   const started = performance.now();
-  const result = await probe(request.instruction, JSON.stringify(request.input), { maxTokens: 5200, deepSeekThinking: 'disabled' });
+  const result = await probe(request.instruction, JSON.stringify(request.input), { maxTokens: 5200, thinking });
   report.profile = { jobId, instructionChars: request.instruction.length, inputChars: JSON.stringify(request.input).length,
     ...result, wallMs: Math.round(performance.now() - started) };
 }
@@ -82,15 +88,15 @@ if (jobId) {
 if (asJson) {
   console.log(JSON.stringify(report, null, 2));
 } else {
-  console.log(`模型 ${report.model}  ${report.baseUrl}`);
+  console.log(`模型 ${report.model}  ${report.baseUrl}  思考 ${report.thinking}`);
   const line = (label, value) => console.log(`  ${label.padEnd(10)} ${value}`);
   const ms = (value) => (value === null ? '—' : `${value}ms`);
   line('ping', `${report.ping.runs} 次  最小 ${ms(report.ping.minMs)}  p50 ${ms(report.ping.p50Ms)}  p95 ${ms(report.ping.p95Ms)}  最慢 ${ms(report.ping.maxMs)}`);
   line('失败', `${report.ping.failed} 次${report.ping.errors.length ? `（${report.ping.errors.join(', ')}）` : ''}`);
-  line('token', `输入 ${report.ping.tokensIn}  输出 ${report.ping.tokensOut}`);
+  line('token', `输入 ${report.ping.tokensIn}（缓存 ${report.ping.cachedTokens}）  输出 ${report.ping.tokensOut}（思考 ${report.ping.reasoningTokens}）`);
   if (report.profile) {
-    line('画像', `${ms(report.profile.ms)}  输出 ${report.profile.tokensOut ?? '—'} token${report.profile.error ? `  失败 ${report.profile.error}` : ''}`);
+    line('画像', `${ms(report.profile.ms)}  输出 ${report.profile.tokensOut ?? '—'} token（思考 ${report.profile.reasoningTokens ?? 0}）${report.profile.error ? `  失败 ${report.profile.error}` : ''}`);
     line('画像输入', `${report.profile.instructionChars} 字符提示词 + ${report.profile.inputChars} 字符输入`);
   }
-  console.log('\n改动前后各跑一次，把这两行数字贴进 PR。');
+  console.log(`\n改动前后各跑一次，把这两行数字贴进 PR。加 --thinking on 可做质量对照。`);
 }

@@ -21,6 +21,24 @@ const SCREENING_PROMPT_VERSION = PROMPT_VERSIONS.screening;
 const PROFILE_PROMPT_VERSION = PROMPT_VERSIONS.profile;
 type Kind = 'profile' | 'screening' | 'summary' | 'questions' | 'composite' | 'test';
 type Status = 'none' | 'generating' | 'ready' | 'failed' | 'manual';
+/**
+ * Per-task request budget. `tokens` caps the output the task can produce; the stored bodies are
+ * about a tenth of that, so the ceiling only stops runaway generations. `attemptMs` is one
+ * request's own ceiling and `deadlineMs` bounds the whole task, which leaves room for one retry.
+ */
+const TASK_LIMITS: Record<Kind, { tokens: number; retryTokens: number; attemptMs: number; deadlineMs: number }> = {
+  summary: { tokens: 2_200, retryTokens: 1_500, attemptMs: 22_000, deadlineMs: 30_000 },
+  composite: { tokens: 1_800, retryTokens: 1_300, attemptMs: 22_000, deadlineMs: 30_000 },
+  screening: { tokens: 1_800, retryTokens: 1_200, attemptMs: 18_000, deadlineMs: 25_000 },
+  questions: { tokens: 1_200, retryTokens: 900, attemptMs: 18_000, deadlineMs: 25_000 },
+  profile: { tokens: 5_200, retryTokens: 5_200, attemptMs: 30_000, deadlineMs: LLM_TIMEOUT_MS },
+  test: { tokens: 256, retryTokens: 256, attemptMs: 15_000, deadlineMs: 15_000 },
+};
+/** A provider that failed before answering, or answered with nothing usable, is worth one retry. */
+const RETRYABLE_REASONS = new Set(['timeout', 'empty_response', 'malformed_json', 'invalid_response']);
+const MIN_RETRY_MS = 4_000;
+/** Optional hard ceiling on the tokens one day may spend. Zero or unset means unlimited. */
+const DAILY_TOKEN_CAP = Number(process.env.HIRELOOP_AI_DAILY_TOKENS ?? 0) || 0;
 interface JobRow {
   id: string;
   title: string;
@@ -179,17 +197,23 @@ const reasonMessages: Record<string, string> = {
   invalid_profile_structure: 'AI 画像的指标或分档格式有误，可重试',
   insufficient_transcript: '转写稿至少需要 200 字，可先手填总结', incomplete_rounds: '等待两轮面试总结',
   interrupted: '上次生成已中断，可重试', internal_error: 'AI 生成未完成，可重试',
+  budget_exhausted: '今日 AI 用量已达上限，请明天再试或联系管理员调高额度',
 };
 const reasonFor = (code?: string | null) => code ? reasonMessages[code] ?? reasonMessages.internal_error : undefined;
 
+type Usage = { tokensIn: number | null; tokensOut: number | null; reasoningTokens: number | null; cachedTokens: number | null };
+const NO_USAGE: Usage = { tokensIn: null, tokensOut: null, reasoningTokens: null, cachedTokens: null };
+
 function recordRun(kind: Kind, subjectId: string, actorId: string, inputHash: string, model: string | null,
-  status: RunRecord['status'], error: string | null, elapsedMs: number, tokensIn: number | null = null, tokensOut: number | null = null): void {
+  status: RunRecord['status'], error: string | null, elapsedMs: number, usage: Usage = NO_USAGE): void {
   const runId = id('ai');
   transaction(() => {
-    run(`INSERT INTO ai_runs (id, kind, subject_id, input_hash, model, prompt_version, status, error, duration_ms, tokens_in, tokens_out, actor_id, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [runId, kind, subjectId, inputHash, model, PROMPT_VERSIONS[kind], status, error, elapsedMs, tokensIn, tokensOut, actorId, now()]);
+    run(`INSERT INTO ai_runs (id, kind, subject_id, input_hash, model, prompt_version, status, error, duration_ms,
+      tokens_in, tokens_out, reasoning_tokens, cached_tokens, actor_id, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [runId, kind, subjectId, inputHash, model, PROMPT_VERSIONS[kind], status, error,
+      elapsedMs, usage.tokensIn, usage.tokensOut, usage.reasoningTokens, usage.cachedTokens, actorId, now()]);
     if (status !== 'skipped') audit({ actorId, action: 'ai.invoke', entityType: 'ai_run', entityId: runId,
-      detail: { kind, subjectId, status, error, elapsedMs, tokensIn, tokensOut } });
+      detail: { kind, subjectId, status, error, elapsedMs, ...usage } });
   });
 }
 
@@ -198,26 +222,56 @@ function recordCacheHit(kind: Kind, subjectId: string, actorId: string, inputHas
   recordRun(kind, subjectId, actorId, inputHash, null, 'skipped', 'cache_hit', 0);
 }
 
+/** Spending is counted per calendar day from the run log, so a batch cannot drain the budget unnoticed. */
+function dailyTokens(): number {
+  if (!DAILY_TOKEN_CAP) return 0;
+  const dayStart = `${now().slice(0, 10)}T00:00:00.000Z`;
+  const spent = getRow<{ spent: number }>(
+    'SELECT COALESCE(SUM(tokens_in), 0) + COALESCE(SUM(tokens_out), 0) AS spent FROM ai_runs WHERE created_at >= ?',
+    [dayStart],
+  );
+  return spent?.spent ?? 0;
+}
+
+/** Reasoning is the bulk of output cost and no task needs it; the profile retry escalates instead. */
+function thinkingFor(kind: Kind, config: LlmConfig, attempt: number): 'disabled' | 'enabled' {
+  if (kind === 'profile' && attempt > 0) return 'enabled';
+  return config.thinking === 'on' ? 'enabled' : 'disabled';
+}
+
 async function generate<T>(kind: Kind, subjectId: string, actorId: string, inputHash: string, config: LlmConfig,
   instruction: string, input: unknown, validate: (value: unknown) => T | undefined, isCurrent?: () => boolean): Promise<{ value?: T; reason?: string }> {
   const start = performance.now();
   const elapsed = () => Math.floor(performance.now() - start);
-  let tokensIn: number | null = null;
-  let tokensOut: number | null = null;
-  const addUsage = (usage: { tokensIn: number | null; tokensOut: number | null }) => {
-    if (usage.tokensIn !== null) tokensIn = (tokensIn ?? 0) + usage.tokensIn;
-    if (usage.tokensOut !== null) tokensOut = (tokensOut ?? 0) + usage.tokensOut;
+  const limits = TASK_LIMITS[kind];
+  const usage: Usage = { ...NO_USAGE };
+  const addUsage = (next: Partial<Usage>) => {
+    for (const key of ['tokensIn', 'tokensOut', 'reasoningTokens', 'cachedTokens'] as const) {
+      const value = next[key];
+      if (value != null) usage[key] = (usage[key] ?? 0) + value;
+    }
   };
   const recordCompletion = (status: 'ok' | 'failed', reason: string | null, elapsedMs: number) => {
     const superseded = kind === 'screening' && isCurrent?.() === false;
     recordRun(kind, subjectId, actorId, inputHash, config.model, superseded ? 'skipped' : status,
-      superseded ? 'superseded' : reason, elapsedMs, tokensIn, tokensOut);
+      superseded ? 'superseded' : reason, elapsedMs, usage);
   };
+  if (DAILY_TOKEN_CAP && dailyTokens() >= DAILY_TOKEN_CAP) {
+    recordCompletion('failed', 'budget_exhausted', 0);
+    return { reason: 'budget_exhausted' };
+  }
   for (let attempt = 0; ; attempt++) {
+    const remaining = limits.deadlineMs - elapsed();
+    if (remaining < MIN_RETRY_MS) {
+      recordCompletion('failed', 'timeout', elapsed());
+      return { reason: 'timeout' };
+    }
+    const options = {
+      maxTokens: attempt ? limits.retryTokens : limits.tokens,
+      thinking: thinkingFor(kind, config, attempt),
+      timeoutMs: Math.min(limits.attemptMs, remaining),
+    };
     try {
-      const options = kind === 'profile'
-        ? { maxTokens: 5200, deepSeekThinking: attempt ? 'enabled' : 'disabled', timeoutMs: LLM_TIMEOUT_MS - elapsed() } as const
-        : undefined;
       const answer = await llmTransport.requestJson(config, `${POLICY}\n${instruction}`, toJson(input), options);
       addUsage(answer);
       const value = validate(answer.value);
@@ -227,10 +281,9 @@ async function generate<T>(kind: Kind, subjectId: string, actorId: string, input
     } catch (error) {
       const reason = error instanceof LlmFailure ? error.code : 'internal_error';
       if (error instanceof LlmFailure && error.usage) addUsage(error.usage);
-      const elapsedMs = elapsed();
-      if (kind === 'profile' && attempt === 0 && elapsedMs < LLM_TIMEOUT_MS - 5000
-        && ['empty_response', 'malformed_json', 'invalid_profile_structure'].includes(reason) && isCurrent?.() !== false) continue;
-      recordCompletion('failed', reason, elapsedMs);
+      const retryable = RETRYABLE_REASONS.has(reason) || (kind === 'profile' && reason === 'invalid_profile_structure');
+      if (!attempt && retryable && isCurrent?.() !== false && limits.deadlineMs - elapsed() > MIN_RETRY_MS) continue;
+      recordCompletion('failed', reason, elapsed());
       return { reason };
     }
   }
@@ -537,12 +590,36 @@ function saveSummary(row: InterviewRow, status: Status, summary?: SummaryData, m
     [status, toJson(summary ?? {}), model ?? null, summary ? now() : null, row.id]);
 }
 
+/**
+ * The summary only needs to name a label, never describe its five tiers, so the whole profile
+ * dictionary is replaced by names. Stable blocks lead the payload: the transcript varies per
+ * interview, and putting it first would defeat the provider's prefix cache for everything after it.
+ */
+function summaryProfile(profile: Profile) {
+  return {
+    positioning: profile.positioning.slice(0, 80),
+    hard_gates: profile.hard_gates.map(({ condition }) => condition),
+    redlines: profile.redlines,
+    indicators: profile.indicators.map(({ name, labels }) => ({ name, labels: labels.map(({ name: label }) => label) })),
+  };
+}
+
+function planQuestions(row: InterviewRow): string[] | null {
+  const plan = validatePlan(jsonParse(row.plan_json, null));
+  return plan ? plan.questions.map(({ question }) => question) : null;
+}
+
 function summaryInput(row: InterviewRow) {
   const application = applicationRow(row.application_id);
   const profile = relevantProfile(application);
   const previous = summaryValue(priorInterview(row));
-  const input = { transcript: row.transcript?.slice(0, TRANSCRIPT_LIMIT) ?? '', profile: promptProfile(profile), resume: resumeText(application),
-    plan: jsonParse(row.plan_json, {}), previous: previous ? toJson(previous).slice(0, JD_LIMIT) : null };
+  const input = {
+    profile: summaryProfile(profile),
+    resume: resumeText(application),
+    plan: planQuestions(row),
+    previous: previous ? { headline: previous.headline, concerns: previous.concerns.map(({ point }) => point) } : null,
+    transcript: row.transcript?.slice(0, TRANSCRIPT_LIMIT) ?? '',
+  };
   return { input, profile };
 }
 

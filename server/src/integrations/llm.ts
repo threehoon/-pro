@@ -13,6 +13,16 @@ export const DEFAULT_LLM_MODEL = 'deepseek-flash';
 const OFFICIAL_DEEPSEEK_URL = /^https:\/\/api\.deepseek\.com(?:\/v1)?\/?$/;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 export const LLM_TIMEOUT_MS = 45_000;
+/**
+ * Reasoning tokens are billed like output tokens but never reach the product: the stored JSON is
+ * roughly a tenth of what the model emits with thinking on. Generation is off unless asked for.
+ */
+export const THINKING_POLICIES = ['off', 'on'] as const;
+export type ThinkingPolicy = (typeof THINKING_POLICIES)[number];
+/** Only a provider that documents the switch receives the field; anything else is sent unchanged. */
+export function supportsThinkingControl(target: URL): boolean {
+  return OFFICIAL_DEEPSEEK_URL.test(target.href);
+}
 /** A vetted DNS answer is reused briefly: every request still revalidates the address itself. */
 const DNS_CACHE_MS = 60_000;
 /**
@@ -73,8 +83,10 @@ export function publicLlmBaseUrl(value: string): URL {
   return url;
 }
 
-export interface LlmConfig { baseUrl: string; model: string; apiKey: string }
-const savedSettings = z.object({ base_url: z.string(), model: z.string(), api_key: z.string() });
+export interface LlmConfig { baseUrl: string; model: string; apiKey: string; thinking: ThinkingPolicy }
+const thinkingPolicy = z.enum(THINKING_POLICIES);
+const savedSettings = z.object({ base_url: z.string(), model: z.string(), api_key: z.string(),
+  thinking: thinkingPolicy.nullish().catch(null) });
 const configModel = z.string().trim().regex(/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/, '模型名称格式不正确');
 const configKey = z.string().max(1024).regex(/^[\x21-\x7e]*$/, 'API Key 格式不正确');
 
@@ -90,6 +102,7 @@ function storedConfig(): LlmConfig {
     baseUrl,
     model: resolveModel(baseUrl, parsed.data?.model || DEFAULT_LLM_MODEL),
     apiKey: parsed.data?.api_key || '',
+    thinking: parsed.data?.thinking ?? 'off',
   };
 }
 
@@ -103,8 +116,10 @@ export function activeLlmConfig(): LlmConfig | undefined {
 export function llmSettings() {
   const config = storedConfig();
   const monthStart = `${now().slice(0, 7)}-01T00:00:00.000Z`;
-  const tokens = getRow<{ tokensIn: number; tokensOut: number }>(
-    'SELECT COALESCE(SUM(tokens_in), 0) AS tokensIn, COALESCE(SUM(tokens_out), 0) AS tokensOut FROM ai_runs WHERE created_at >= ?',
+  const tokens = getRow<{ tokensIn: number; tokensOut: number; reasoning: number; cached: number }>(
+    `SELECT COALESCE(SUM(tokens_in), 0) AS tokensIn, COALESCE(SUM(tokens_out), 0) AS tokensOut,
+      COALESCE(SUM(reasoning_tokens), 0) AS reasoning, COALESCE(SUM(cached_tokens), 0) AS cached
+     FROM ai_runs WHERE created_at >= ?`,
     [monthStart],
   );
   return {
@@ -112,12 +127,15 @@ export function llmSettings() {
     model: config.model,
     keyTail: config.apiKey.length > 4 ? config.apiKey.slice(-4) : null,
     configured: Boolean(activeLlmConfig()),
+    thinking: config.thinking,
     tokensIn: tokens?.tokensIn ?? 0,
     tokensOut: tokens?.tokensOut ?? 0,
+    reasoningTokens: tokens?.reasoning ?? 0,
+    cachedTokens: tokens?.cached ?? 0,
   };
 }
 
-export function parseLlmSettings(value: { baseUrl?: string; model?: string; apiKey?: string }): LlmConfig {
+export function parseLlmSettings(value: { baseUrl?: string; model?: string; apiKey?: string; thinking?: ThinkingPolicy }): LlmConfig {
   const previous = storedConfig();
   const previousUrl = publicLlmBaseUrl(previous.baseUrl);
   const destination = publicLlmBaseUrl(value.baseUrl ?? previousUrl.href);
@@ -129,7 +147,7 @@ export function parseLlmSettings(value: { baseUrl?: string; model?: string; apiK
   if (apiKey.data && (baseUrl.includes(apiKey.data) || model.data.includes(apiKey.data) || effectiveModel.includes(apiKey.data))) {
     throw badRequest('请勿将 API Key 写入模型地址或名称');
   }
-  return { baseUrl, model: effectiveModel, apiKey: apiKey.data };
+  return { baseUrl, model: effectiveModel, apiKey: apiKey.data, thinking: value.thinking ?? previous.thinking };
 }
 
 export function saveLlmSettings(value: Parameters<typeof parseLlmSettings>[0], actorId: string) {
@@ -138,7 +156,8 @@ export function saveLlmSettings(value: Parameters<typeof parseLlmSettings>[0], a
     run(`INSERT INTO integrations (provider, status, config_json, updated_by, updated_at) VALUES ('llm', ?, ?, ?, ?)
       ON CONFLICT(provider) DO UPDATE SET status = excluded.status, config_json = excluded.config_json,
       updated_by = excluded.updated_by, updated_at = excluded.updated_at`, [
-      config.apiKey ? 'configured' : 'disabled', toJson({ base_url: config.baseUrl, model: config.model, api_key: config.apiKey }), actorId, now(),
+      config.apiKey ? 'configured' : 'disabled',
+      toJson({ base_url: config.baseUrl, model: config.model, api_key: config.apiKey, thinking: config.thinking }), actorId, now(),
     ]);
     audit({ actorId, action: 'settings.llm.update', entityType: 'integration', entityId: 'llm' });
   });
@@ -149,24 +168,29 @@ export interface LlmResult {
   value: unknown;
   tokensIn: number | null;
   tokensOut: number | null;
+  /** Billed like output, never shown: the part of `tokensOut` spent on hidden reasoning. */
+  reasoningTokens: number | null;
+  /** Prompt tokens served from the provider's prefix cache, billed at a fraction of fresh input. */
+  cachedTokens: number | null;
 }
 
 type LlmFailureCode = 'unsafe_endpoint' | 'timeout' | 'provider_error' | 'invalid_response'
   | 'empty_response' | 'truncated_response' | 'malformed_json' | 'invalid_profile_structure';
-type LlmUsage = Pick<LlmResult, 'tokensIn' | 'tokensOut'>;
+type LlmUsage = Pick<LlmResult, 'tokensIn' | 'tokensOut' | 'reasoningTokens' | 'cachedTokens'>;
 
 export class LlmFailure extends Error {
   readonly code: LlmFailureCode;
-  readonly usage?: LlmUsage;
+  /** Partial on purpose: a provider that never answered reports no detail fields at all. */
+  readonly usage?: Partial<LlmUsage>;
 
-  constructor(code: LlmFailureCode, usage?: LlmUsage) {
+  constructor(code: LlmFailureCode, usage?: Partial<LlmUsage>) {
     super(code);
     this.code = code;
     this.usage = usage;
   }
 }
 
-type RequestOptions = { maxTokens: number; deepSeekThinking?: 'disabled' | 'enabled'; timeoutMs?: number };
+type RequestOptions = { maxTokens: number; thinking?: 'disabled' | 'enabled'; timeoutMs?: number };
 
 function waitForDns(hostname: string, signal: AbortSignal) {
   return new Promise<LookupAddress[]>((resolve, reject) => {
@@ -249,14 +273,15 @@ async function requestJson(config: LlmConfig, instruction: string, input: string
   }
   const signal = AbortSignal.timeout(options?.timeoutMs ?? LLM_TIMEOUT_MS);
   const selected = await selectVettedAddress(target, signal);
-  const useDeepSeekThinking = OFFICIAL_DEEPSEEK_URL.test(target.href) && options?.deepSeekThinking;
+  // The task policy decides; the host only decides whether the provider understands the field.
+  const thinking = options?.thinking && supportsThinkingControl(target) ? options.thinking : undefined;
   target.pathname = `${target.pathname.replace(/\/+$/, '')}/chat/completions`;
   const body = JSON.stringify({
     model: config.model,
     messages: [{ role: 'system', content: instruction }, { role: 'user', content: input }],
     response_format: { type: 'json_object' },
     ...(options ? { max_tokens: options.maxTokens } : {}),
-    ...(useDeepSeekThinking ? { thinking: { type: useDeepSeekThinking } } : {}),
+    ...(thinking ? { thinking: { type: thinking } } : {}),
   });
   let attempt = await postCompletion(target, selected, config, body, signal);
   if (attempt.kind === 'stale') {
@@ -272,7 +297,13 @@ const responseEnvelope = z.object({
     message: z.unknown(),
     finish_reason: z.string().nullish(),
   })).min(1),
-  usage: z.object({ prompt_tokens: usageValue, completion_tokens: usageValue }).nullish().catch(null),
+  usage: z.object({
+    prompt_tokens: usageValue,
+    completion_tokens: usageValue,
+    // Served-from-cache input. Named per the provider; absent elsewhere.
+    prompt_cache_hit_tokens: usageValue,
+    completion_tokens_details: z.object({ reasoning_tokens: usageValue }).nullish().catch(null),
+  }).nullish().catch(null),
 });
 const responseMessage = z.object({ content: z.string().nullish() });
 const incompleteReasons = new Set(['content_filter', 'tool_calls', 'function_call', 'insufficient_system_resource', 'aborted']);
@@ -283,7 +314,12 @@ export function decodeLlmResponse(response: string, secret: string): LlmResult {
   const envelope = responseEnvelope.safeParse(jsonParse(response, null));
   if (!envelope.success) throw new LlmFailure('invalid_response');
   const { usage, choices: [choice] } = envelope.data;
-  const tokens = { tokensIn: usage?.prompt_tokens ?? null, tokensOut: usage?.completion_tokens ?? null };
+  const tokens = {
+    tokensIn: usage?.prompt_tokens ?? null,
+    tokensOut: usage?.completion_tokens ?? null,
+    reasoningTokens: usage?.completion_tokens_details?.reasoning_tokens ?? null,
+    cachedTokens: usage?.prompt_cache_hit_tokens ?? null,
+  };
   const finishReason = choice!.finish_reason;
   if (finishReason === 'length') throw new LlmFailure('truncated_response', tokens);
   if (finishReason && incompleteReasons.has(finishReason)) throw new LlmFailure('invalid_response', tokens);
